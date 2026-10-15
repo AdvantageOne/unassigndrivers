@@ -938,7 +938,7 @@ geotab.addin.unassignDrivers = function () {
           (e.failed && e.failed.length ? "<strong>Failed</strong><br>" + detail(e.failed) + "<br>" : "") +
           (e.stillAssigned && e.stillAssigned.length ? "<strong>Still assigned after run</strong><br>" + detail(e.stillAssigned) : "") + "</details>"
         : (e.note ? esc(e.note) : "");
-      return "<tr><td>" + esc(fmt(new Date(e.at))) + "</td><td>" + trig + "</td><td>" + esc(e.by || "") + "</td><td>" +
+      return "<tr><td>" + esc(fmt(new Date(e.at))) + "</td><td>" + trig + "</td><td>" + esc(byLabel(e.by)) + "</td><td>" +
         (e.unassigned || []).length + "</td><td>" + (e.skipped || []).length + "</td><td>" + ((e.failed || []).length + (e.stillAssigned || []).length) +
         "</td><td>" + body + "</td></tr>";
     }).join("");
@@ -1081,6 +1081,12 @@ geotab.addin.unassignDrivers = function () {
   }
 
   // Pick up our page element; if MyGeotab rebuilt it, rebind the controls.
+  // Older service runs were saved as "GitHub Actions (user)"; show them under the current name.
+  function byLabel(by) {
+    if (!by) return "";
+    return /^GitHub Actions\b/.test(by) ? "Unassign Service" : by;
+  }
+
   function showTab(name) {
     ["scheduler", "service"].forEach(function (t) {
       var panel = $("a1ud-tab-" + t);
