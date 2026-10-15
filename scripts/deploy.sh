@@ -52,7 +52,8 @@ What it does, in order:
   2. checks the AWS credentials and that the environment region matches --region;
   3. creates the state bucket advone-<region>-deploy if missing (versioning,
      SSE, public access blocked, bucket-owner-enforced) and writes or verifies
-     the deployment.json ownership marker inside it;
+     this service's ownership marker inside it; every object it owns lives under
+     the $SERVICE_SLUG/ prefix, because other services share that bucket;
   4. builds dist/lambda.zip from src/ (zero runtime dependencies);
   5. tofu init -reconfigure against infra/backend/<ca|us>.hcl, then plan;
   6. prints a summary of what will be added, changed and destroyed;
@@ -158,6 +159,25 @@ run_selftest() {
   st_false "OpenTofu 1.9.9 does not satisfy >= 1.10" version_ge "1.9.9" "1.10"
 
   st_eq "tenant schedule-group prefix is the contract default" "UnassignDriverSchedules" "$SCHEDULE_GROUP_PREFIX"
+
+  st_eq "state key lives under the service prefix" "scheduled-driver-unassign/terraform.tfstate" "$STATE_KEY"
+  st_eq "ownership marker lives under the same prefix" "scheduled-driver-unassign/deployment.json" "$DEPLOYMENT_MARKER_KEY"
+  st_eq "the pre-prefix state key is still tracked for migration" "unassign/terraform.tfstate" "$LEGACY_STATE_KEY"
+  st_eq "another service's state is not ours" "scheduled-driver-unassign/terraform.tfstate" \
+        "$(printf '%s\n' "other-service/terraform.tfstate" "scheduled-driver-unassign/terraform.tfstate" | filter_our_state_keys)"
+  st_eq "unprefixed state is not ours" "" \
+        "$(printf '%s\n' "unassign/terraform.tfstate" "other-service/terraform.tfstate" | filter_our_state_keys)"
+  st_eq "the state lock file is not counted as state" "scheduled-driver-unassign/terraform.tfstate" \
+        "$(printf '%s\n' "scheduled-driver-unassign/terraform.tfstate.tflock" "scheduled-driver-unassign/terraform.tfstate" | filter_our_state_keys)"
+  for code in ca us; do
+    st_eq "infra/backend/$code.hcl declares the contract state key" "$STATE_KEY" \
+          "$(backend_hcl_key "$(backend_hcl_path "$code")")"
+  done
+  local hcl_fixture="$PLAN_DIR/selftest-backend.hcl"
+  printf '%s\n' 'bucket = "somewhere"' 'key    = "other-service/terraform.tfstate"' > "$hcl_fixture"
+  st_eq "a backend config naming another service is read correctly" "other-service/terraform.tfstate" "$(backend_hcl_key "$hcl_fixture")"
+  st_false "a backend config naming another service is refused" test \
+           "$(backend_hcl_key "$hcl_fixture")" = "$STATE_KEY"
 
   marker="$(deployment_marker_json "advone-ca-central" "ca-central-1" "123456789012" "2026-10-15T00:00:00Z" "arn:aws:iam::123456789012:user/ops" "11111111-2222-3333-4444-555555555555")"
   st_eq "marker: deploymentName" "advone-ca-central" "$(printf '%s' "$marker" | jq -r .deploymentName)"
@@ -316,12 +336,14 @@ configure_state_bucket() {
            --ownership-controls '{"Rules":[{"ObjectOwnership":"BucketOwnerEnforced"}]}'
 }
 
-# Prints the tfstate object keys currently in the state bucket (one per line).
+# This service's tfstate object keys in the state bucket, one per line. The
+# listing is prefixed, so another Advantage One service storing its state in the
+# same bucket is neither counted nor touched.
 state_keys() {
-  aws_try s3api list-objects-v2 --bucket "$STATE_BUCKET" \
+  aws_try s3api list-objects-v2 --bucket "$STATE_BUCKET" --prefix "$SERVICE_SLUG/" \
           --query 'Contents[].Key' --output json 2>/dev/null \
     | jq -r '.[]?' 2>/dev/null \
-    | grep -E '\.tfstate$' || true
+    | filter_our_state_keys || true
 }
 
 check_state_keys() {
@@ -332,10 +354,40 @@ check_state_keys() {
     return 0
   fi
   if [ "$FORCE" -eq 0 ]; then
-    die_fix "s3://$STATE_BUCKET already holds other OpenTofu state: $(printf '%s' "$extra" | tr '\n' ' ')" \
-            "this deployment owns exactly one state key ($STATE_KEY); use the project that owns that state, or delete it deliberately and re-run with --force"
+    die_fix "s3://$STATE_BUCKET already holds other state for this service: $(printf '%s' "$extra" | tr '\n' ' ')" \
+            "this deployment owns exactly one state key ($STATE_KEY) under the $SERVICE_SLUG/ prefix; use the project that owns that state, or delete it deliberately and re-run with --force"
   fi
-  warn "s3://$STATE_BUCKET holds other state keys ($(printf '%s' "$extra" | tr '\n' ' ')) — continuing because of --force"
+  warn "s3://$STATE_BUCKET holds other state keys for this service ($(printf '%s' "$extra" | tr '\n' ' ')) — continuing because of --force"
+}
+
+# The state key moved under the service prefix when the deploy buckets started
+# hosting more than one service. Without this check an older deployment would
+# look empty here and be created a second time.
+check_legacy_state_key() {
+  [ "$LEGACY_STATE_KEY" = "$STATE_KEY" ] && return 0
+  s3_object_exists "$STATE_BUCKET" "$LEGACY_STATE_KEY" || return 0
+  if s3_object_exists "$STATE_BUCKET" "$STATE_KEY"; then
+    warn "s3://$STATE_BUCKET holds state at both $LEGACY_STATE_KEY and $STATE_KEY — using $STATE_KEY"
+    return 0
+  fi
+  die_fix "s3://$STATE_BUCKET/$LEGACY_STATE_KEY holds this service's state from before the service prefix" \
+          "move it under the prefix and re-run: aws s3 mv s3://$STATE_BUCKET/$LEGACY_STATE_KEY s3://$STATE_BUCKET/$STATE_KEY --region $AWS_REGION"
+}
+
+# The backend config decides where OpenTofu reads and writes state; the scripts
+# decide where the ownership marker and the guards look. If they disagree, the
+# deployment would plan against an empty state.
+check_backend_key() {
+  local declared
+  declared="$(backend_hcl_key "$BACKEND_HCL")"
+  if [ -z "$declared" ]; then
+    die_fix "could not read the state key from $BACKEND_HCL" "it must contain: key = \"$STATE_KEY\""
+  fi
+  if [ "$declared" != "$STATE_KEY" ]; then
+    die_fix "$BACKEND_HCL declares the state key \"$declared\" but the scripts use \"$STATE_KEY\"" \
+            "point both at the same key (this service's prefix in the deploy bucket is $SERVICE_SLUG/)"
+  fi
+  info "state key: s3://$STATE_BUCKET/$STATE_KEY"
 }
 
 write_deployment_marker() {
@@ -362,6 +414,7 @@ bootstrap_state_bucket() {
     create_state_bucket
   fi
   configure_state_bucket
+  check_legacy_state_key
 
   marker="$(mktemp "${TMPDIR:-/tmp}/unassign-marker.XXXXXX")"
   rc=0
@@ -390,8 +443,8 @@ bootstrap_state_bucket() {
     1)
       rm -f "$marker"
       if [ -n "$(state_keys)" ] && [ "$FORCE" -eq 0 ]; then
-        die_fix "s3://$STATE_BUCKET already holds OpenTofu state but no $DEPLOYMENT_MARKER_KEY ownership marker" \
-                "inspect it with: aws s3 ls s3://$STATE_BUCKET --recursive — then re-run with --force if it really is this deployment's state"
+        die_fix "s3://$STATE_BUCKET already holds OpenTofu state for this service but no $DEPLOYMENT_MARKER_KEY ownership marker" \
+                "inspect it with: aws s3 ls s3://$STATE_BUCKET/$SERVICE_SLUG/ --recursive — then re-run with --force if it really is this deployment's state"
       fi
       DEPLOYMENT_ID="$(random_uuid)" || die_fix "could not generate a deploymentId" "install uuidgen (macOS) or openssl, then re-run"
       write_deployment_marker
@@ -462,6 +515,7 @@ tofu_init() {
   if [ ! -f "$BACKEND_HCL" ]; then
     die_fix "the backend config $BACKEND_HCL does not exist" "restore infra/backend/$REGION_CODE.hcl (state bucket $STATE_BUCKET, key $STATE_KEY, use_lockfile = true)"
   fi
+  check_backend_key
   info "tofu init -reconfigure ($BACKEND_HCL)"
   local rc=0
   tofu -chdir="$TF_DIR" init -reconfigure -backend-config="$BACKEND_HCL" -input=false || rc=$?

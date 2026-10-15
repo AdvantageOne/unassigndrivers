@@ -5,8 +5,16 @@ country; both are the same code with different variables and state.
 
 | Deployment | Region | OpenTofu state | Tenant config |
 |---|---|---|---|
-| Canada | `ca-central-1` | `s3://advone-ca-central-deploy/unassign/terraform.tfstate` | `s3://advone-ca-central-config/config/customers.json` |
-| United States | `us-east-2` | `s3://advone-east-2-deploy/unassign/terraform.tfstate` | `s3://advone-east-2-config/config/customers.json` |
+| Canada | `ca-central-1` | `s3://advone-ca-central-deploy/scheduled-driver-unassign/terraform.tfstate` | `s3://advone-ca-central-config/config/customers.json` |
+| United States | `us-east-2` | `s3://advone-east-2-deploy/scheduled-driver-unassign/terraform.tfstate` | `s3://advone-east-2-config/config/customers.json` |
+
+The two `-deploy` buckets are shared with other Advantage One services, so everything this service
+owns sits under the `scheduled-driver-unassign/` prefix — its state, the state lock OpenTofu writes
+beside it, and its ownership marker. The deploy script only ever lists and guards that prefix, so
+another service storing its state in the same bucket is neither counted nor touched. Both backend
+configs and the scripts derive the prefix from one constant (`SERVICE_SLUG` in
+`scripts/lib/common.sh`); a mismatch between the backend config and the scripts is refused before
+`tofu init`.
 
 What one deployment contains: a Lambda function (`advone-unassign-api`) with a Function URL, one S3
 bucket holding the tenant registry, a Secrets Manager secret per tenant, an SNS topic with the
@@ -65,8 +73,10 @@ The script, in order:
 
 1. checks `aws`, `tofu` (>= 1.10), `jq` and `zip`, then `aws sts get-caller-identity`;
 2. creates the state bucket if it does not exist (versioning, encryption, public access blocked);
-3. writes and verifies `deployment.json` in that bucket — if the marker names a different account
-   or region, it stops rather than touching someone else's deployment (`--force` adopts it);
+3. writes and verifies its ownership marker (`scheduled-driver-unassign/deployment.json`) in that
+   bucket — if the marker names a different account or region, it stops rather than touching someone
+   else's deployment (`--force` adopts it). It also refuses to run if this service's state is still
+   sitting at the pre-prefix key, and prints the `aws s3 mv` that fixes it;
 4. builds `dist/lambda.zip` from `src/` and checks that it contains `src/lambda/handler.js`;
 5. `tofu init` with `infra/backend/<region>.hcl`, then `tofu plan`;
 6. prints a summary of adds / changes / **destroys** and asks for confirmation (`--yes` skips the
@@ -180,6 +190,9 @@ Log lines are JSON and include `outcome`, `action`, `database`, `unassigned`, `s
 | Two runs for one slot | A tenant still runs the legacy in-browser scheduler with a signed-in tab | Set `SERVER_API_BASE`, or set the add-in's schedule to disabled in Geotab |
 | `dist/lambda.zip` built but apply fails on the handler | The archive does not keep the `src/` prefix | Rebuild from the repo root (`zip -qr dist/lambda.zip src`) |
 | Deploy refuses with "state bucket belongs to …" | The marker names another account or region | Confirm you meant to adopt it, then `--force` |
+| Deploy refuses with "state from before the service prefix" | This service deployed before the state key gained its prefix | Run the `aws s3 mv` the error prints (moves `unassign/terraform.tfstate` to `scheduled-driver-unassign/terraform.tfstate`), then re-run |
+| Deploy refuses with "already holds other state for this service" | A second state key exists under this service's prefix (a stray copy or a hand-made state) | Inspect `aws s3 ls s3://<bucket>/scheduled-driver-unassign/ --recursive`, then delete the stray deliberately and re-run (or `--force`) |
+| Another service's state shows up in a deploy message | It should not — the script lists only this service's prefix | Report it: the prefix comes from `SERVICE_SLUG` in `scripts/lib/common.sh` |
 
 ## 10. Limits worth knowing
 

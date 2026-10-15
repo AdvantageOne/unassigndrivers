@@ -18,11 +18,18 @@
 COMMON_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "$COMMON_SH_DIR/../.." && pwd)}"
 
+# The deploy buckets (advone-<region>-deploy) hold more than one service, so
+# every object this service owns sits under its own prefix: the OpenTofu state,
+# the lock file OpenTofu writes beside it, and this service's ownership marker.
+# Changing the slug is a state migration, not a rename.
+SERVICE_SLUG="scheduled-driver-unassign"
+
 # Contract constants (frozen): state key, config object key, tenant schedule-group
 # prefix, Lambda function name.
-STATE_KEY="unassign/terraform.tfstate"
+STATE_KEY="$SERVICE_SLUG/terraform.tfstate"
+LEGACY_STATE_KEY="unassign/terraform.tfstate" # pre-prefix location; deploy.sh refuses to duplicate it
 CONFIG_KEY="config/customers.json"
-DEPLOYMENT_MARKER_KEY="deployment.json"
+DEPLOYMENT_MARKER_KEY="$SERVICE_SLUG/deployment.json"
 SCHEDULE_GROUP_PREFIX="${SCHEDULE_GROUP_PREFIX:-UnassignDriverSchedules}"
 LAMBDA_FUNCTION_NAME="advone-unassign-api"
 
@@ -250,7 +257,8 @@ select_region() {
   TF_DIR="$REPO_ROOT/infra/live/$code"
   BACKEND_HCL="$(backend_hcl_path "$code")"
   export REGION_CODE AWS_REGION REGION_COUNTRY DEPLOYMENT_NAME STATE_BUCKET CONFIG_BUCKET \
-         DEFAULT_TIMEZONE TF_DIR BACKEND_HCL CONFIG_KEY SCHEDULE_GROUP_PREFIX STATE_KEY
+         DEFAULT_TIMEZONE TF_DIR BACKEND_HCL CONFIG_KEY SCHEDULE_GROUP_PREFIX STATE_KEY \
+         SERVICE_SLUG LEGACY_STATE_KEY DEPLOYMENT_MARKER_KEY
 }
 
 # ---------------------------------------------------------------------------
@@ -536,6 +544,24 @@ S3_CONFIG_ETAG=""
 S3_CONFIG_ERR=""
 S3_GET_ETAG=""
 S3_GET_ERR=""
+
+# backend_hcl_key <file> -> the state key declared in an OpenTofu s3 backend config.
+backend_hcl_key() {
+  grep -E '^[[:space:]]*key[[:space:]]*=' "$1" 2>/dev/null | head -1 \
+    | sed -E 's/^[^=]*=[[:space:]]*"([^"]*)".*$/\1/'
+}
+
+# filter_our_state_keys: stdin = object keys, stdout = this service's tfstate
+# keys. Other services share the deploy bucket, so their state must never be
+# counted as ours (and vice versa).
+filter_our_state_keys() {
+  grep -F -- "$SERVICE_SLUG/" | grep -E '\.tfstate$' || true
+}
+
+# s3_object_exists <bucket> <key> -> exit 0 when the object is there.
+s3_object_exists() {
+  aws_try s3api head-object --bucket "$1" --key "$2" >/dev/null 2>&1
+}
 
 # s3_get_object <bucket> <key> <outfile> -> 0 ok (sets S3_GET_ETAG), 1 absent, 2 error
 s3_get_object() {

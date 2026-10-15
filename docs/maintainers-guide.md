@@ -130,6 +130,13 @@ group (`GroupSecurityId`) must never be trusted: it lists every filter as `isAdd
 `infra/live/<region>`. Then `scripts/deploy.sh --region <r>` (it plans first). CORS origins come
 from `ALLOWED_ORIGINS`.
 
+**Where state lives.** The two `advone-<region>-deploy` buckets are shared with other Advantage One
+services, so this service owns everything under the `scheduled-driver-unassign/` prefix: state,
+lock file, ownership marker. The prefix is one constant (`SERVICE_SLUG` in `scripts/lib/common.sh`)
+and `infra/backend/{ca,us}.hcl` must declare the same key; the deploy script refuses to `init` if
+they disagree, and its "other state" guards only ever look under the prefix. Renaming the slug is a
+state migration (`aws s3 mv`), not an edit.
+
 **Change the browser contract** (envelope, status codes, CORS behaviour)
 `src/lambda/http.js` plus `test/handler.test.js`, and keep `src/addin/api-client.js` in step.
 
@@ -183,6 +190,10 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
    that writes does not leak into the next one; pass shared objects knowingly.
 10. **The add-in UI wiring has never been exercised against a live MyGeotab** (see §8). Treat the
     service-mode card as the least-verified part of the system.
+11. **The deploy buckets are shared.** Never list, guard or clean up objects in
+    `advone-<region>-deploy` without the `scheduled-driver-unassign/` prefix — another service's
+    state may be sitting next to ours. `state_keys()` in `scripts/deploy.sh` is prefixed for exactly
+    this reason, and `check_legacy_state_key` stops a pre-prefix deployment from being created twice.
 
 ## 8. What is verified, and what is not
 
@@ -196,7 +207,7 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 | Config/secret validation, caching, redaction | tested |
 | Add-in build integrity (regions match `src/`, markers intact, globals present) | tested |
 | OpenTofu for both regions | `tofu fmt -check` clean; `tofu validate` passes in `infra/live/ca` and `infra/live/us` (no apply: no credentials here) |
-| Scripts | `bash -n` clean; 32 + 52 + 20 self-test assertions pass; help/error paths verified; live AWS paths not exercised |
+| Scripts | `bash -n` clean; 42 + 52 + 20 self-test assertions pass (including the state-key prefix and the backend-config/key agreement); help/error paths verified; live AWS paths not exercised |
 | Add-in server-mode card (create/list/edit/delete/run-now) | **Not verified against a live MyGeotab.** Syntax-checked, every element id it references exists, and the client it uses is unit tested — but it needs a real database to be called done |
 | Clearance against real users | **Not verified.** Needs the two-user proof in the deployment guide §2.2, which is also what proves `addIn.securityId.id` is right |
 
