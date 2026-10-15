@@ -523,7 +523,7 @@ const core = (function () { var module = { exports: {} };
 
 return module.exports; })(); // inlined by build.js into the published single file
 
-const RUNNER_NAME = "GitHub Actions";
+const RUNNER_NAME = "Unassign Service"; // shown as "By" in the add-in's Run history
 
 /* ---------------- MyGeotab JSON-RPC client shaped like the add-in `api` object ---------------- */
 function createApi(account, fetchImpl) {
@@ -585,7 +585,7 @@ async function processDatabase(api, opts) {
   const now = opts.now || new Date();
   const mode = opts.mode || "run-if-due";
   const runLabel = "github-actions-" + (opts.runId || Date.now());
-  const by = RUNNER_NAME + " (" + (opts.userName || "service account") + ")";
+  const by = RUNNER_NAME;
 
   const records = await core.loadRecords(api);
   const s = records.schedule && records.schedule.details;
