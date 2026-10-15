@@ -547,7 +547,9 @@ S3_GET_ERR=""
 
 # backend_hcl_key <file> -> the state key declared in an OpenTofu s3 backend config.
 backend_hcl_key() {
-  grep -E '^[[:space:]]*key[[:space:]]*=' "$1" 2>/dev/null | head -1 \
+  # -m1 rather than `| head -1`: head closing the pipe early would hand grep a
+  # SIGPIPE, which `set -o pipefail` reports as a failed command substitution.
+  grep -m1 -E '^[[:space:]]*key[[:space:]]*=' -- "$1" 2>/dev/null \
     | sed -E 's/^[^=]*=[[:space:]]*"([^"]*)".*$/\1/'
 }
 

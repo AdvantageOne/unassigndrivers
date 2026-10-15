@@ -179,6 +179,27 @@ run_selftest() {
   st_false "a backend config naming another service is refused" test \
            "$(backend_hcl_key "$hcl_fixture")" = "$STATE_KEY"
 
+  # Artifact check. The archive built from this repo must pass, and the check
+  # must not be defeated by the pipefail/SIGPIPE trap it used to fall into.
+  local zdir="$PLAN_DIR/selftest-zip"
+  if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+    mkdir -p "$zdir/pkg/src/lambda" "$zdir/pkg/src/core"
+    : > "$zdir/pkg/src/lambda/handler.js"
+    : > "$zdir/pkg/src/core/unassign-core.js"
+    ( cd "$zdir/pkg" && zip -qr "$zdir/good.zip" src )
+    ( cd "$zdir/pkg" && zip -qr "$zdir/bad.zip" src/core )
+    st_true "artifact check finds the handler under src/" lambda_zip_has_handler "$zdir/good.zip"
+    st_false "artifact check rejects an archive without the handler" lambda_zip_has_handler "$zdir/bad.zip"
+    st_false "artifact check rejects a missing archive" lambda_zip_has_handler "$zdir/absent.zip"
+    if [ -f "$REPO_ROOT/src/lambda/handler.js" ]; then
+      ( cd "$REPO_ROOT" && zip -qr "$zdir/repo.zip" src -x '*.DS_Store' -x '*node_modules*' -x 'test/*' )
+      st_true "an archive built from this repo's src passes the artifact check" lambda_zip_has_handler "$zdir/repo.zip"
+      st_true "the archive holds src/ at its root" bash -c "unzip -Z1 '$zdir/repo.zip' | grep -c '^src/lambda/handler.js$' | grep -qx 1"
+    fi
+  else
+    st_true "artifact check skipped: zip/unzip not installed" true
+  fi
+
   marker="$(deployment_marker_json "advone-ca-central" "ca-central-1" "123456789012" "2026-10-15T00:00:00Z" "arn:aws:iam::123456789012:user/ops" "11111111-2222-3333-4444-555555555555")"
   st_eq "marker: deploymentName" "advone-ca-central" "$(printf '%s' "$marker" | jq -r .deploymentName)"
   st_eq "marker: region" "ca-central-1" "$(printf '%s' "$marker" | jq -r .region)"
@@ -460,6 +481,24 @@ bootstrap_state_bucket() {
 # ---------------------------------------------------------------------------
 # Lambda artifact (zero runtime dependencies: the runtime provides SDK v3)
 # ---------------------------------------------------------------------------
+
+# lambda_zip_has_handler <zip> -> 0 when the archive holds src/lambda/handler.js.
+#
+# The listing is read into a variable rather than piped into `grep -q`: greps
+# that match early exit and close the pipe, unzip then takes SIGPIPE, and under
+# `set -o pipefail` that turns a perfectly good archive into a failed build.
+# Missing unzip is treated as "cannot check" so the guard never blocks a deploy.
+lambda_zip_has_handler() {
+  local listing
+  command -v unzip >/dev/null 2>&1 || return 0
+  [ -f "$1" ] || return 1
+  listing="$(unzip -Z1 "$1" 2>/dev/null)" || return 1
+  case "$listing" in
+    *src/lambda/handler.js*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # build_lambda_zip <strict|allow-missing>
 #   strict: this run applies code, so src/ must be present and the archive must
 #           keep the src/ prefix (the handler is src/lambda/handler.handler).
@@ -496,11 +535,9 @@ build_lambda_zip() {
   if [ ! -s "$zip" ]; then
     die_fix "dist/lambda.zip was not produced" "run the build by hand to see why: (cd $REPO_ROOT && zip -qr dist/lambda.zip src)"
   fi
-  if [ "$mode" = "strict" ] && command -v unzip >/dev/null 2>&1; then
-    if ! unzip -l "$zip" | grep -q 'src/lambda/handler.js'; then
-      die_fix "dist/lambda.zip does not contain src/lambda/handler.js (Terraform expects handler src/lambda/handler.handler)" \
-              "build it from the repo root so the src/ prefix is kept: (cd $REPO_ROOT && zip -qr dist/lambda.zip src)"
-    fi
+  if [ "$mode" = "strict" ] && ! lambda_zip_has_handler "$zip"; then
+    die_fix "dist/lambda.zip does not contain src/lambda/handler.js (Terraform expects handler src/lambda/handler.handler)" \
+            "build it from the repo root so the src/ prefix is kept: (cd $REPO_ROOT && zip -qr dist/lambda.zip src)"
   fi
   info "artifact dist/lambda.zip: $(wc -c < "$zip" | tr -d ' ') bytes"
 }
