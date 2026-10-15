@@ -4,16 +4,16 @@
  *
  * A Lambda Function URL with `authorization_type = NONE` is the transport: the
  * caller's MyGeotab session is the only credential, validated in the handler.
- * That makes the browser origin check meaningful, so it is enforced here rather
- * than left to the platform.
+ *
+ * CORS headers belong to the function URL (`cors { }` in infra/modules/unassign),
+ * which adds them to every response and answers the preflight itself. This module
+ * therefore adds none of its own: Lambda would return both sets and the browser
+ * would reject the response with "'Access-Control-Allow-Origin' header contains
+ * multiple values". The origin allow-list check stays here as a second gate.
  */
 "use strict";
 
 const { appError, asAppError, errorBody } = require("./lib/errors");
-
-const CORS_METHODS = "POST, OPTIONS";
-const CORS_HEADERS = "content-type";
-const CORS_MAX_AGE = "600";
 
 function header(event, name) {
   const headers = (event && event.headers) || {};
@@ -62,24 +62,15 @@ function isOriginAllowed(origin, allowedOrigins) {
   return allowed.includes(origin);
 }
 
-function corsHeaders(origin, allowedOrigins) {
-  const headers = {
-    "access-control-allow-methods": CORS_METHODS,
-    "access-control-allow-headers": CORS_HEADERS,
-    "access-control-max-age": CORS_MAX_AGE,
-    "content-type": "application/json",
-    vary: "origin"
-  };
-  if (origin && isOriginAllowed(origin, allowedOrigins)) {
-    headers["access-control-allow-origin"] = allowedOrigins.includes("*") ? "*" : origin;
-  }
-  return headers;
+/** Response headers this function owns. CORS headers come from the function URL. */
+function responseHeaders() {
+  return { "content-type": "application/json", vary: "origin" };
 }
 
 function respond(statusCode, body, origin, allowedOrigins, extraHeaders) {
   return {
     statusCode,
-    headers: Object.assign(corsHeaders(origin, allowedOrigins), extraHeaders || {}),
+    headers: Object.assign(responseHeaders(), extraHeaders || {}),
     body: JSON.stringify(body)
   };
 }
@@ -96,6 +87,11 @@ function failure(error, options) {
     options.origin, options.allowedOrigins);
 }
 
+/**
+ * Answers an OPTIONS request. Normally unreachable through the function URL,
+ * which handles preflight itself; it exists so a direct invoke (local runs, the
+ * deploy smoke test) and a deployment without URL CORS still behave.
+ */
 function preflight(origin, allowedOrigins) {
   if (!isOriginAllowed(origin, allowedOrigins)) {
     return respond(403, { ok: false, error: errorBody(appError("ADDIN_ACCESS_DENIED", "Origin not allowed.")) }, origin, allowedOrigins);
@@ -103,4 +99,4 @@ function preflight(origin, allowedOrigins) {
   return respond(204, {}, origin, allowedOrigins);
 }
 
-module.exports = { parseEvent, decodeJsonBody, header, isOriginAllowed, corsHeaders, respond, ok, failure, preflight };
+module.exports = { parseEvent, decodeJsonBody, header, isOriginAllowed, responseHeaders, respond, ok, failure, preflight };

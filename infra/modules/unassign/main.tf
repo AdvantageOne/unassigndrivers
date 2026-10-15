@@ -335,9 +335,13 @@ resource "aws_lambda_function_url" "api" {
   cors {
     allow_credentials = false
     allow_headers     = ["content-type"]
-    allow_methods     = ["POST", "OPTIONS"]
-    allow_origins     = var.allowed_origins
-    max_age           = 600
+    # "OPTIONS" is rejected here: AllowMethods members are capped at six
+    # characters by the Lambda API, and Lambda answers the preflight itself when
+    # CORS is configured on the function URL. Only the real request method goes
+    # in this list.
+    allow_methods = ["POST"]
+    allow_origins = var.allowed_origins
+    max_age       = 600
   }
 }
 

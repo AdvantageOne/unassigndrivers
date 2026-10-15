@@ -167,12 +167,27 @@ function outcomes(lines) {
   return lines.filter((line) => line.outcome).map((line) => line.outcome);
 }
 
-test("a preflight from the allowed origin is answered with CORS headers", async () => {
+test("a preflight from the allowed origin is answered, without CORS headers", async () => {
   const { deps, context } = harness();
   const response = await handleEvent(httpEvent("listSchedules", { method: "OPTIONS" }), context, deps);
   assert.equal(response.statusCode, 204);
-  assert.equal(response.headers["access-control-allow-origin"], ORIGIN);
-  assert.equal(response.headers["access-control-allow-methods"], "POST, OPTIONS");
+  // CORS headers are the function URL's job: emitting them here as well makes
+  // Lambda return duplicates and the browser reject the response.
+  assert.equal(response.headers["access-control-allow-origin"], undefined);
+  assert.equal(response.headers["content-type"], "application/json");
+});
+
+test("no response carries CORS headers", async () => {
+  const { deps, context } = harness();
+  for (const event of [
+    httpEvent("health", { session: null }),
+    httpEvent("listSchedules"),
+    httpEvent("listSchedules", { origin: "https://evil.example.com" })
+  ]) {
+    const response = await handleEvent(event, context, deps);
+    const headers = Object.keys(response.headers).join(",");
+    assert.equal(/access-control/i.test(headers), false, `unexpected CORS header in: ${headers}`);
+  }
 });
 
 test("a request from another origin is refused before any work", async () => {

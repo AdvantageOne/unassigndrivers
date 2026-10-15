@@ -103,9 +103,17 @@ shows a **Scheduled runs** card, hides the in-browser-only controls (grace windo
 stops running schedules from the browser tab. With it empty, the add-in keeps its original
 in-browser scheduler.
 
-CORS: the deployment accepts only the origins in `ALLOWED_ORIGINS` (a Terraform variable). Add the
-add-in's frame origin — `https://cdn.jsdelivr.net` for the jsDelivr-hosted build — and any
-`https://<database>.my.geotab.com` origin in use, then re-apply.
+CORS has exactly one owner: the Function URL. Its `cors` block carries the origins from
+`ALLOWED_ORIGINS` (a Terraform variable), so add the add-in's frame origin — `https://cdn.jsdelivr.net`
+for the jsDelivr-hosted build — and any `https://<database>.my.geotab.com` origin in use, then
+re-apply. Lambda adds those headers to every response and answers the preflight itself, which is why
+the function adds none: if both did, the browser would reject the response as having multiple
+`Access-Control-Allow-Origin` values. Two consequences worth knowing:
+
+- `allow_methods` is `["POST"]`. The Lambda API caps each member at six characters, so `OPTIONS`
+  cannot be listed; it does not need to be, because the browser checks the *actual* request method.
+- A request from an origin that is not listed never reaches the function: Lambda refuses it at the
+  edge. The function checks the origin again, as a second gate, when something invokes it directly.
 
 ## 5. Onboard a customer
 
@@ -183,7 +191,9 @@ Log lines are JSON and include `outcome`, `action`, `database`, `unassigned`, `s
 | Symptom | Likely cause | Action |
 |---|---|---|
 | Add-in shows "Add-In access denied" for everyone | `addIn.securityId.id` is empty, or the caller's clearance groups do not carry the add-in's filter | Do step 2 of §2; check `clearance` flags in the config |
-| Every request denied with `403` and no log of an action | Origin not in `ALLOWED_ORIGINS` | Add the add-in's frame origin and re-apply |
+| Every request denied with `403` and no log of an action | Origin not in `ALLOWED_ORIGINS` (Lambda refuses it before the function runs) | Add the add-in's frame origin and re-apply |
+| Browser console: "Access-Control-Allow-Origin header contains multiple values" | Something re-added CORS headers in the function, on top of the Function URL's | Delete them from `src/lambda/http.js`; the Function URL is the only owner |
+| `ValidationException: Value '[POST, OPTIONS]' at 'cors.allowMethods'` during apply | `OPTIONS` was added to `allow_methods` | Keep `allow_methods = ["POST"]`; Lambda answers the preflight and rejects `OPTIONS` (members are capped at six characters) |
 | `401 SESSION_INVALID` | The forwarded session expired, or `sessionId` was not sent | Confirm the add-in's `getSession()` shape (§2.3) |
 | `403 DATABASE_NOT_ONBOARDED` | The database is not in the config, or `enabled` is false | Onboard it, or check the config |
 | Scheduled slot never fired | No schedule for that scope/time, schedule group missing, or Lambda permission missing | `aws scheduler list-schedules --group-name …`; check the Scheduler execution role in `infra/modules/unassign` |

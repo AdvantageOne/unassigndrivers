@@ -128,7 +128,10 @@ group (`GroupSecurityId`) must never be trusted: it lists every filter as `isAdd
 **Change scheduling behaviour** (cadence, retries, DLQ, alarms, CORS)
 `infra/modules/unassign` variables and, for the alarm subscriber, `alarm_email` in
 `infra/live/<region>`. Then `scripts/deploy.sh --region <r>` (it plans first). CORS origins come
-from `ALLOWED_ORIGINS`.
+from `ALLOWED_ORIGINS`, and the Function URL is the only place that emits CORS headers — the
+function deliberately emits none (duplicates make the browser reject the response), and
+`allow_methods` can only hold `POST` because Lambda caps that list's members at six characters, so
+`OPTIONS` is unrepresentable there. Lambda answers the preflight itself.
 
 **Where state lives.** The two `advone-<region>-deploy` buckets are shared with other Advantage One
 services, so this service owns everything under the `scheduled-driver-unassign/` prefix: state,
@@ -194,6 +197,14 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
     `advone-<region>-deploy` without the `scheduled-driver-unassign/` prefix — another service's
     state may be sitting next to ours. `state_keys()` in `scripts/deploy.sh` is prefixed for exactly
     this reason, and `check_legacy_state_key` stops a pre-prefix deployment from being created twice.
+12. **CORS belongs to the Function URL, not the function.** `allow_methods` accepts only values of
+    six characters or fewer, so `OPTIONS` cannot be listed — that is not a bug to work around, and
+    Lambda answers the preflight itself. Adding `access-control-*` headers in `src/lambda/http.js`
+    produces duplicate headers and a browser-level rejection.
+13. **Offline green does not mean the call site is covered.** Two deploy-script bugs (the binary
+    plan file fed to jq, the artifact check killed by `pipefail`) passed every selftest because the
+    *function* was exercised and its caller was not. When you change an argument or a contract, add
+    an assertion on the call site.
 
 ## 8. What is verified, and what is not
 

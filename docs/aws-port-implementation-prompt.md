@@ -456,8 +456,12 @@ OpenTofu, one root per region, same module, variables only:
   empty `customers.json` if absent.
 - Lambda: `nodejs22.x`, `arm64`, 256 MB, 300 s timeout, single function, env = config bucket name,
   region, deployment name, alarm topic.
-- Lambda Function URL with CORS allowing only the add-in origins confirmed in Step 0 (methods POST,
-  headers `content-type`).
+- Lambda Function URL with CORS allowing only the add-in origins confirmed in Step 0, headers
+  `content-type`. The method list holds **`POST` alone**: the Lambda API caps each `AllowMethods`
+  member at six characters, so `OPTIONS` is rejected outright, and Lambda answers the preflight
+  itself once the URL has CORS configured. The function must not emit CORS headers of its own —
+  Lambda then returns both sets and the browser rejects the response for having multiple
+  `Access-Control-Allow-Origin` values.
 - IAM role for the Lambda: `s3:GetObject` on `config/*`, `secretsmanager:GetSecretValue` on
   `unassign/*`, `scheduler:Create|Update|Delete|Get|List*` scoped to the tenant group prefix,
   `iam:PassRole` on the Scheduler role only, `cloudwatch:PutMetricData`, logs.

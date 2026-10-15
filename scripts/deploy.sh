@@ -269,6 +269,21 @@ JSON
   st_false "nothing hands the plan file straight to jq" \
            grep -nE 'jq[^|]*"\$PLAN_PATH"' "$SCRIPT_DIR/deploy.sh"
 
+  # Header parsing for the CORS preflight check, whose remaining logic needs AWS.
+  local hdr="$PLAN_DIR/selftest-headers.txt"
+  printf '%s\r\n' 'HTTP/2 200' 'access-control-allow-origin: https://my.geotab.com' 'access-control-allow-methods: POST' 'content-type: application/json' > "$hdr"
+  st_eq "preflight headers: allow-origin" "https://my.geotab.com" "$(header_value "$hdr" 'access-control-allow-origin')"
+  st_eq "preflight headers: allow-methods" "POST" "$(header_value "$hdr" 'access-control-allow-methods')"
+  st_eq "preflight headers: status line" "HTTP/2 200" "$(header_value "$hdr" 'HTTP')"
+  st_eq "preflight headers: absent header is empty" "" "$(header_value "$hdr" 'access-control-allow-credentials')"
+  # A missing header must not fail the caller: assignment position plus pipefail
+  # would abort the script right where it should be reporting a refused preflight.
+  local hdr_missing
+  hdr_missing="$(header_value "$hdr" 'access-control-allow-credentials')"
+  st_eq "preflight headers: a missing header does not fail an assignment" "" "$hdr_missing"
+  printf '%s\n' 'HTTP/2 403' 'content-type: application/json' > "$hdr"
+  st_eq "preflight headers: a refused preflight has no allow-origin" "" "$(header_value "$hdr" 'access-control-allow-origin')"
+
   st_done "$SCRIPT_NAME"
 }
 
@@ -657,6 +672,62 @@ output_value() { # <json output doc> <name>
   printf '%s' "$2" | jq -r --arg n "$1" '.[$n].value // empty' 2>/dev/null || true
 }
 
+# header_value <headers-file> <header-name> -> the header's value, CR stripped, or "".
+# Always succeeds: under `set -o pipefail` a missing header would otherwise make
+# `x="$(header_value …)"` abort the script — the refused-preflight case, which is
+# precisely the one worth reporting. -m1 rather than `| head -1` for the same
+# reasons (no SIGPIPE into a closed pipe).
+header_value() {
+  if [ "$2" = "HTTP" ]; then # the status line carries no colon
+    grep -m1 -E '^HTTP/' "$1" 2>/dev/null | tr -d '\r' || true
+    return 0
+  fi
+  grep -m1 -i "^$2:" "$1" 2>/dev/null | tr -d '\r' | sed 's/^[^:]*:[[:space:]]*//' || true
+  return 0
+}
+
+# The browser's path is a CORS preflight followed by the POST, and a function
+# URL's CORS block is easy to get subtly wrong — a missing origin, or a method the
+# Lambda API rejects outright. A direct invoke cannot see any of that.
+smoke_test_cors() { # <function-name> <function-url>
+  local fn="$1" url="$2" allowed origin headers rc allow_origin allow_methods status
+  [ -n "$url" ] || return 0
+  if ! command -v curl >/dev/null 2>&1; then
+    info "smoke test: skipping the CORS preflight check (curl is not installed)"
+    return 0
+  fi
+  allowed="$(aws_try lambda get-function-configuration --function-name "$fn" \
+             --query 'Environment.Variables.ALLOWED_ORIGINS' --output text 2>/dev/null || true)"
+  if [ -z "$allowed" ] || [ "$allowed" = "None" ]; then
+    warn "the function has no ALLOWED_ORIGINS, so the browser cannot call this deployment"
+    hint "set allowed_origins in infra/live/$REGION_CODE and re-run $SCRIPT_NAME --region $REGION_CODE"
+    return 0
+  fi
+  origin="${allowed%%,*}"
+  headers="$(mktemp "${TMPDIR:-/tmp}/unassign-cors.XXXXXX")"
+  rc=0
+  curl -sS -o /dev/null -D "$headers" -X OPTIONS "$url" \
+       -H "Origin: $origin" -H "Access-Control-Request-Method: POST" \
+       -H "Access-Control-Request-Headers: content-type" -m 10 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$headers"
+    warn "smoke test: the CORS preflight to $url could not be sent (curl exit $rc)"
+    return 0
+  fi
+  allow_origin="$(header_value "$headers" 'access-control-allow-origin')"
+  allow_methods="$(header_value "$headers" 'access-control-allow-methods')"
+  status="$(header_value "$headers" 'HTTP')"
+  rm -f "$headers"
+
+  info "smoke test: CORS preflight for $origin ($status)"
+  if [ -n "$allow_origin" ]; then
+    ok "the function URL answers the preflight (allow-origin: $allow_origin${allow_methods:+, allow-methods: $allow_methods})"
+  else
+    warn "the function URL did not allow $origin, so the add-in cannot call it"
+    hint "add the add-in's frame origin to allowed_origins in infra/live/$REGION_CODE, then re-run $SCRIPT_NAME --region $REGION_CODE"
+  fi
+}
+
 smoke_test() { # <function-name>
   local fn="$1" out rc body
   out="$(mktemp "${TMPDIR:-/tmp}/unassign-health.XXXXXX")"
@@ -777,6 +848,7 @@ OUTS="$(print_outputs)"
 FN_NAME="$(output_value function_name "$OUTS")"
 [ -n "$FN_NAME" ] || FN_NAME="$LAMBDA_FUNCTION_NAME"
 smoke_test "$FN_NAME"
+smoke_test_cors "$FN_NAME" "$(output_value function_url "$OUTS")"
 
 step "Next steps"
 printf '%s\n' "  endpoint    : $(output_value function_url "$OUTS")"
