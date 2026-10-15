@@ -355,7 +355,8 @@ of add-in filter ids — all recorded in §2 and §6. Still open:
 
 ### Step 1 — Repo layout and tooling
 
-- Add `package.json` (private, runtime deps: AWS SDK v3 clients only; dev: none beyond `node --test`).
+- Add `package.json` (private, **zero dependencies**: the Lambda runtime provides AWS SDK v3 and the
+  tests use `node --test`) with pnpm as the package manager, and commit the lockfile.
 - Add this layout:
 
 ```
@@ -374,7 +375,7 @@ build/inline-core.mjs              # writes the core into unassignDrivers.html b
 test/*.test.js                     # unit tests
 ```
 
-- **Acceptance:** `npm test` runs and passes with an empty suite; `node build/inline-core.mjs` is a
+- **Acceptance:** `pnpm test` runs and passes with an empty suite; `node build/inline-core.mjs` is a
   no-op on the untouched add-in (regenerating produces no diff).
 
 ### Step 2 — Extract the shared core, with tests
@@ -388,7 +389,7 @@ test/*.test.js                     # unit tests
   path once Step 11 removes browser scheduling; keep them only while the old path exists.
 - Tests: DST gap and overlap for `zonedToUtc`; `occurrencesBetween` for daily/weekly/once; unassign
   batch-failure retry; verify pass populating `stillAssigned`; appendLog dedupe.
-- **Acceptance:** `npm test` green; the regenerated add-in has byte-identical behaviour-bearing code;
+- **Acceptance:** `pnpm test` green; the regenerated add-in has byte-identical behaviour-bearing code;
   add-in still loads in a test database.
 
 ### Step 3 — Library layer (config, secrets, Geotab client, logger)

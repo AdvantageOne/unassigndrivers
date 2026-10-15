@@ -38,7 +38,7 @@ running schedules in the browser while a tab is open.
 
 1. Edit the sources, not the built file: schedule logic lives in `src/core/unassign-core.js`, the
    service client in `src/addin/api-client.js`, and the UI in `unassignDrivers.html`.
-2. Run `npm test` (this includes a check that the built file matches `src/`) and `npm run build:addin`.
+2. Run `pnpm test` (this includes a check that the built file matches `src/`) and `pnpm run build:addin`.
 3. Bump `version` in [`config.json`](config.json) and publish a release with a **new** tag that
    matches (for example `v2.0.1`). Never move or reuse a tag: jsDelivr caches each tag permanently.
 4. In each database, replace the add-in configuration with the new `config.json`.
@@ -64,15 +64,22 @@ src/core/unassign-core.js       schedule math, lock, unassign, run log (shared: 
 src/addin/api-client.js         browser client for the scheduling service
 src/lambda/                     the service: handler, actions, libraries
 build/inline-core.mjs           copies src/ into the add-in between BUILD markers
-test/                           unit tests (npm test); no network, no AWS, no tenant required
+package.json                    pnpm scripts and engine pins (no dependencies)
+pnpm-lock.yaml                  lockfile; `pnpm install` writes nothing else
+test/                           unit tests (pnpm test); no network, no AWS, no tenant required
 infra/                          OpenTofu: module plus one thin root per region
 scripts/                        deploy, onboard, offboard
 docs/                           deployment guide, maintainer's guide, design brief, legacy analysis
 ```
 
+**Tooling.** Package manager is pnpm (pinned in `package.json`; `pnpm test`, `pnpm run build:addin`).
+The project has no dependencies — the Lambda runtime provides AWS SDK v3 — so `pnpm install` only
+writes the lockfile and `node_modules/` stays empty. Infrastructure pins the AWS provider to
+`~> 6.69` (lock files record 6.69.0) and requires OpenTofu 1.10+.
+
 **Built regions.** The two marked blocks in `unassignDrivers.html` (`BUILD:core`, `BUILD:client`)
-are generated from `src/` by `npm run build:addin`. Never edit inside those markers: edit the
-source and rebuild, or `npm test` will fail with a clear message.
+are generated from `src/` by `pnpm run build:addin`. Never edit inside those markers: edit the
+source and rebuild, or `pnpm test` will fail with a clear message.
 
 ## Status
 

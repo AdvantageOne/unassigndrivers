@@ -18,8 +18,8 @@ the rewrite followed.
 | Triggered by cron-job.org → GitHub Actions (`workflow_dispatch`) | Triggered by EventBridge Scheduler calling the Lambda directly | No third-party cron, no CI runner, no 15-minute cadence, no 60-day public-repo schedule pause |
 | Every tenant's Administrator password in one repo secret | One **Secrets Manager** secret per tenant, one entry per tenant in an S3 config object | Blast radius and rotation |
 | Access gated by "is this user an Administrator?" (`checkAdmin`) | Gated by the caller's **own MyGeotab session** plus the add-in's **Geotab security filter** (`isAdd`) | A viewer with no access to the add-in is now refused; no shared service account is used for user actions |
-| 505 lines of schedule math copy-pasted between the add-in and the runner, plus a `build.js` that did not exist | One source file `src/core/unassign-core.js`, **inlined into the add-in at build time** | The two copies could silently diverge; now `npm test` fails if they do |
-| No tests, no `package.json`, no IaC | `npm test` (101 tests, no network/AWS/tenant needed), OpenTofu, deploy and onboarding scripts | The schedule math and the retry logic were the risky parts and had no coverage |
+| 505 lines of schedule math copy-pasted between the add-in and the runner, plus a `build.js` that did not exist | One source file `src/core/unassign-core.js`, **inlined into the add-in at build time** | The two copies could silently diverge; now `pnpm test` fails if they do |
+| No tests, no `package.json`, no IaC | `pnpm test` (102 tests, no network/AWS/tenant needed), OpenTofu, deploy and onboarding scripts | The schedule math and the retry logic were the risky parts and had no coverage |
 | Run log written by whoever ran the unassign | **Still written to the tenant's Geotab `AddInData`**, by the Lambda | It is the tenant's audit trail and the add-in's Run history; nothing had to change there |
 
 The add-in's UI, copy, tabs, preview table and Run history are unchanged. What is new is a
@@ -38,8 +38,8 @@ schedule now writes to AWS instead of to Geotab.
 **Never edit inside those markers.** Edit the file in `src/`, then:
 
 ```bash
-npm run build:addin      # regenerates the regions in unassignDrivers.html
-npm test                 # fails loudly if the built file is stale
+pnpm run build:addin      # regenerates the regions in unassignDrivers.html
+pnpm test                 # fails loudly if the built file is stale
 ```
 
 Everything else in the HTML (markup, styles, the UI script) is hand-edited as before.
@@ -56,7 +56,7 @@ Everything else in the HTML (markup, styles, the UI script) is hand-edited as be
 | `src/lambda/lib/` | source | `naming`, `scheduler`, `geotab`, `config-store`, `secrets`, `logger`, `errors` |
 | `src/lambda/aws.js` | source | The only file that imports the AWS SDK (lazily) |
 | `build/inline-core.mjs` | tool | `--check` verifies, without it regenerates |
-| `test/` | tests | `npm test`; fakes live in `test/support/fakes.js` |
+| `test/` | tests | `pnpm test`; fakes live in `test/support/fakes.js` |
 | `infra/modules/unassign` | IaC | Lambda, IAM, Function URL, config bucket, DLQ, SNS, alarms, metric filters |
 | `infra/live/{ca,us}` | IaC | Thin roots: region + names only |
 | `scripts/` | tooling | `deploy.sh`, `onboard-customer.sh`, `offboard-customer.sh`, shared `lib/common.sh` |
@@ -89,13 +89,13 @@ target payload (`spec` inside it), so there is no database to keep in step.
 
 ## 5. Recipes
 
-Every recipe ends with the check that proves it. Run `npm test` before you push; it is fast and
+Every recipe ends with the check that proves it. Run `pnpm test` before you push; it is fast and
 needs nothing external.
 
 **Change what a run does** (the unassign algorithm, batching, verification)
 1. Edit `src/core/unassign-core.js` (or `getAssignments`/`unassign`/`run`).
 2. Add or adjust a test in `test/core.test.js` using `createCoreApi()` from `test/support/fakes.js`.
-3. `npm test && npm run build:addin`.
+3. `pnpm test && pnpm run build:addin`.
 
 **Add a schedule option** (for example "skip assets that are not reporting")
 1. Validate and normalise it in `src/lambda/actions/schedules.js` (`buildPlan`).
@@ -144,7 +144,7 @@ state migration (`aws s3 mv`), not an edit.
 `src/lambda/http.js` plus `test/handler.test.js`, and keep `src/addin/api-client.js` in step.
 
 **Release the add-in**
-Bump `version` in `config.json`, run `npm run build:addin`, commit, publish a **new** tag matching
+Bump `version` in `config.json`, run `pnpm run build:addin`, commit, publish a **new** tag matching
 the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 
 **Onboard, rotate or offboard a tenant**
@@ -157,7 +157,7 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
   file and is used when `SERVER_API_BASE` is empty. In service mode it is inert: `tick()` returns
   immediately and the grace/wake-lock controls are hidden. Once every tenant runs in service mode,
   delete `tick`, `startTimers`, the wake-lock code and the legacy `startServerMode` branch
-  (`onSave`/`onRunNowConfirm`), then re-run `npm test`.
+  (`onSave`/`onRunNowConfirm`), then re-run `pnpm test`.
 - **The migration lock.** While both schedulers can run, a scheduled Lambda run claims the
   occurrence on the tenant's `AddInData` schedule record (the same lock the add-in uses), so a slot
   cannot run twice. When no tenant keeps a client-side schedule, delete that block from
@@ -217,21 +217,27 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 | Handler routing, envelope, CORS, session gate, scheduler path outcomes | tested (`test/handler.test.js`) |
 | Config/secret validation, caching, redaction | tested |
 | Add-in build integrity (regions match `src/`, markers intact, globals present) | tested |
-| OpenTofu for both regions | `tofu fmt -check` clean; `tofu validate` passes in `infra/live/ca` and `infra/live/us` (no apply: no credentials here) |
-| Scripts | `bash -n` clean; 50 + 52 + 20 self-test assertions pass (state-key prefix, backend-config/key agreement, lambda artifact and the plan-summary conversion); the plan summary was also exercised against a real `tofu plan` + `tofu show -json`; live AWS paths not exercised |
+| OpenTofu for both regions | `tofu fmt -check` clean; `tofu validate` passes in `infra/live/ca` and `infra/live/us` on AWS provider 6.69.0 (`~> 6.69`, hashes locked for darwin/linux on arm64 and amd64). No apply: no credentials here, so the first `plan` against the live account is still owed |
+| Scripts | `bash -n` clean; 56 + 52 + 20 self-test assertions pass (state-key prefix, backend-config/key agreement, lambda artifact, plan-summary conversion, CORS preflight parsing); the plan summary was also exercised against a real `tofu plan` + `tofu show -json`, and the CORS check's branches against stubs; live AWS paths not exercised |
 | Add-in server-mode card (create/list/edit/delete/run-now) | **Not verified against a live MyGeotab.** Syntax-checked, every element id it references exists, and the client it uses is unit tested — but it needs a real database to be called done |
 | Clearance against real users | **Not verified.** Needs the two-user proof in the deployment guide §2.2, which is also what proves `addIn.securityId.id` is right |
 
 ## 9. Running things locally
 
 ```bash
-npm test                              # 101 tests, offline
-npm run build:addin                   # regenerate the add-in's generated regions
-npm run check:addin                   # fail if the add-in is stale
+pnpm test                              # 102 tests, offline
+pnpm run build:addin                   # regenerate the add-in's generated regions
+pnpm run check:addin                   # fail if the add-in is stale
 tofu fmt -check -recursive infra && (cd infra/live/ca && tofu validate)
 scripts/deploy.sh --selftest          # the script's pure helpers, offline
 scripts/deploy.sh --region ca         # real deploy: needs an AWS login
 ```
+
+Use **pnpm** (pinned in `package.json` via `packageManager`) for the scripts: `pnpm test`,
+`pnpm run build:addin`, `pnpm run check:addin`. There are no dependencies — the Lambda runtime
+provides AWS SDK v3 — so `pnpm install` only writes the lockfile and leaves `node_modules/` empty;
+`pnpm install --frozen-lockfile` is the CI-safe form. Infrastructure needs OpenTofu 1.10+ and pins
+the AWS provider to `~> 6.69`.
 
 Adding a test: put it in `test/<area>.test.js`, import the module directly, and build the world in
 memory with the helpers in `test/support/fakes.js` (`createCoreApi`, `createFakeGeotab`,

@@ -10,6 +10,10 @@ crash.log
 # Lambda deployment artifact, built by scripts/deploy.sh (never commit)
 dist/
 
+# Node (pnpm; the project has no dependencies — the Lambda runtime provides SDK v3)
+node_modules/
+pnpm-debug.log*
+
 # Local secrets
 .env
 .env.*

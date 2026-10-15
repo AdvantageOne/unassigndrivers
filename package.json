@@ -4,8 +4,10 @@
   "private": true,
   "description": "AWS Lambda + EventBridge Scheduler runner for the Scheduled Driver Unassign MyGeotab add-in",
   "license": "UNLICENSED",
+  "packageManager": "pnpm@11.25.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "pnpm": ">=10"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
