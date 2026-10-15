@@ -24,6 +24,7 @@ SELFTEST=0
 
 PLAN_DIR=""
 PLAN_PATH=""
+PLAN_JSON_PATH=""
 PLAN_NAME="deploy.tfplan"
 
 usage() {
@@ -105,8 +106,12 @@ deployment_marker_json() { # <deploymentName> <region> <accountId> <createdAt> <
       deploymentId: $deploymentId}'
 }
 
-# plan_rows <plan-json-file> — one "action<TAB>address" line per changed resource
-# plus "output<TAB>name" lines for changed outputs. Pure jq over a plan document.
+# plan_rows — stdin: the JSON produced by `tofu show -json`; stdout: one
+# "kind<TAB>address" line per changed resource, plus "output<TAB>name" lines for
+# changed outputs. Pure jq over a plan document.
+#
+# Never hand this the .tfplan file: that is a zip, not JSON, and jq reports the
+# binary bytes as "Invalid numeric literal". Use read_plan_json to convert it.
 plan_rows() {
   jq -r '
     def act:
@@ -120,7 +125,19 @@ plan_rows() {
     ((.output_changes // {}) | to_entries[]
       | select(((.value.actions // []) | index("no-op")) == null)
       | "output\t\(.key)")
-  ' "$1"
+  '
+}
+
+# read_plan_json <planfile> <outfile> — converts a .tfplan to JSON with
+# `tofu show -json` and dies clearly if that fails.
+read_plan_json() {
+  local plan="$1" out="$2" rc
+  rc=0
+  tofu -chdir="$TF_DIR" show -json "$plan" > "$out" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
+    die_fix "could not read $plan as a plan (tofu show -json failed)" \
+            "re-run the plan step: the file must be the .tfplan written by tofu plan -out"
+  fi
 }
 
 # render_plan_rows <plan_rows output> — human lines, destroys and replaces in red.
@@ -224,7 +241,7 @@ run_selftest() {
   }
 }
 JSON
-  rows="$(plan_rows "$fixture")"
+  rows="$(plan_rows < "$fixture")"
   counts="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="create"{a++} $1=="update"{c++} $1=="destroy"{d++} $1=="replace"{r++} END{printf "%d %d %d %d", a+0, c+0, d+0, r+0}')"
   st_eq "plan rows: 2 add / 1 change / 1 destroy / 1 replace" "2 1 1 1" "$counts"
   st_true "plan rows: no-op resource omitted" test "$(printf '%s\n' "$rows" | grep -c 'unrelated' || true)" = "0"
@@ -239,7 +256,18 @@ JSON
 
   local empty="$PLAN_DIR/selftest-plan-empty.json"
   printf '%s\n' '{"resource_changes": [], "output_changes": {}}' > "$empty"
-  st_eq "plan rows: empty plan has no rows" "" "$(plan_rows "$empty")"
+  st_eq "plan rows: empty plan has no rows" "" "$(plan_rows < "$empty")"
+
+  # Regression: the summary once handed the .tfplan itself to jq, which is a zip.
+  # Offline, the cheapest proof is that the conversion step exists and that no
+  # call site feeds the plan file to jq directly.
+  local fakeplan="$PLAN_DIR/selftest-fake.tfplan"
+  printf 'PK\003\004not json, like a real plan file' > "$fakeplan"
+  st_false "a .tfplan file is not readable as JSON" bash -c "jq . '$fakeplan' >/dev/null 2>&1"
+  st_true "the summary converts the plan with read_plan_json" \
+          grep -q 'read_plan_json "\$PLAN_PATH" "\$PLAN_JSON_PATH"' "$SCRIPT_DIR/deploy.sh"
+  st_false "nothing hands the plan file straight to jq" \
+           grep -nE 'jq[^|]*"\$PLAN_PATH"' "$SCRIPT_DIR/deploy.sh"
 
   st_done "$SCRIPT_NAME"
 }
@@ -569,6 +597,7 @@ run_plan() {
     PLAN_NAME="deploy.tfplan"
   fi
   PLAN_PATH="$PLAN_DIR/$PLAN_NAME"
+  PLAN_JSON_PATH="$PLAN_DIR/plan.json"
   local rc
   if [ "$DESTROY" -eq 1 ]; then
     info "tofu plan -destroy"
@@ -588,7 +617,8 @@ run_plan() {
 
 print_plan_summary() {
   local rows adds changes destroys replaces
-  rows="$(plan_rows "$PLAN_PATH")"
+  read_plan_json "$PLAN_PATH" "$PLAN_JSON_PATH"
+  rows="$(plan_rows < "$PLAN_JSON_PATH")"
   adds="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="create"{n++} END{print n+0}')"
   changes="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="update"{n++} END{print n+0}')"
   destroys="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="destroy"{n++} END{print n+0}')"

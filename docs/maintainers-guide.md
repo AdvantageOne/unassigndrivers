@@ -207,7 +207,7 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 | Config/secret validation, caching, redaction | tested |
 | Add-in build integrity (regions match `src/`, markers intact, globals present) | tested |
 | OpenTofu for both regions | `tofu fmt -check` clean; `tofu validate` passes in `infra/live/ca` and `infra/live/us` (no apply: no credentials here) |
-| Scripts | `bash -n` clean; 42 + 52 + 20 self-test assertions pass (including the state-key prefix and the backend-config/key agreement); help/error paths verified; live AWS paths not exercised |
+| Scripts | `bash -n` clean; 50 + 52 + 20 self-test assertions pass (state-key prefix, backend-config/key agreement, lambda artifact and the plan-summary conversion); the plan summary was also exercised against a real `tofu plan` + `tofu show -json`; live AWS paths not exercised |
 | Add-in server-mode card (create/list/edit/delete/run-now) | **Not verified against a live MyGeotab.** Syntax-checked, every element id it references exists, and the client it uses is unit tested — but it needs a real database to be called done |
 | Clearance against real users | **Not verified.** Needs the two-user proof in the deployment guide §2.2, which is also what proves `addIn.securityId.id` is right |
 
