@@ -38,7 +38,16 @@ locals {
         ignoreCatalogGroup   = true
       }
     }
-    defaults  = { skipDriving = true, graceMinutes = 60 }
+    defaults = { skipDriving = true, graceMinutes = 60 }
+    # Staff domains may set a database up from the add-in and are never blocked by
+    # licensing; `enforce = false` keeps the license visible to the add-in but
+    # stops the service refusing unlicensed callers. Both are data: edit them in
+    # config/customers.json, no deploy needed. The Lambda falls back to these same
+    # values when the block is absent.
+    licensing = {
+      staffDomains = ["advtracking.net", "advantageone.tech"]
+      enforce      = true
+    }
     customers = {}
   }
 }
@@ -145,10 +154,33 @@ data "aws_iam_policy_document" "lambda" {
     resources = ["${aws_s3_bucket.config.arn}/${var.config_key}"]
   }
 
+  # The staff-only setup action registers a database, which means writing this
+  # one object. It is guarded by an ETag (If-Match), so a concurrent write is
+  # detected rather than overwritten.
+  statement {
+    sid       = "WriteDeploymentConfig"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.config.arn}/${var.config_key}"]
+  }
+
   statement {
     sid       = "ReadCustomerSecrets"
     effect    = "Allow"
     actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:${local.partition}:secretsmanager:${var.region}:${local.account_id}:secret:unassign/*"]
+  }
+
+  # Same action, same staff-only path: a caller with a proven session whose email
+  # domain is an Advantage One one can seed or rotate a tenant's service account.
+  # GetSecretValue above is what every scheduled run uses.
+  statement {
+    sid    = "ManageCustomerSecrets"
+    effect = "Allow"
+    actions = [
+      "secretsmanager:CreateSecret",
+      "secretsmanager:PutSecretValue",
+    ]
     resources = ["arn:${local.partition}:secretsmanager:${var.region}:${local.account_id}:secret:unassign/*"]
   }
 

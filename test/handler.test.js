@@ -84,11 +84,51 @@ function harness(options) {
         dlqArn: ""
       }),
       geotabFor: settings.geotabFor || (() => geotabFor(state, settings)),
+      configWriter: settings.configWriter || fakeConfigWriter(config),
+      secretPublisher: settings.secretPublisher || fakeSecretPublisher(),
       now: () => new Date("2026-10-15T00:00:00.000Z")
     }
   });
 
-  return { deps, state, lines, schedulerClient, config, context: { awsRequestId: "req-abc" } };
+  return {
+    deps,
+    state,
+    lines,
+    schedulerClient,
+    config,
+    context: { awsRequestId: "req-abc" },
+    configWriter: deps.configWriter,
+    secretPublisher: deps.secretPublisher
+  };
+}
+
+/** In-memory stand-in for the ETag-guarded S3 writer. */
+function fakeConfigWriter(config) {
+  let stored = JSON.stringify(config);
+  return {
+    writes: [],
+    async mutate(mutator) {
+      const next = await mutator(JSON.parse(stored));
+      if (!next) return { unchanged: true, attempts: 1 };
+      stored = JSON.stringify(next);
+      this.writes.push(next);
+      return { config: next, attempts: 1 };
+    },
+    stored: () => JSON.parse(stored)
+  };
+}
+
+/** In-memory stand-in for Secrets Manager. */
+function fakeSecretPublisher() {
+  const secrets = [];
+  return {
+    secrets,
+    async put(name, payload) {
+      const created = !secrets.some((secret) => secret.name === name);
+      secrets.push({ name, payload });
+      return { name, created };
+    }
+  };
 }
 
 /** One geotab double that answers both the clearance calls and the core's calls. */
@@ -346,6 +386,136 @@ test("a schedule that was deleted before it fired is skipped", async () => {
   assert.equal(response.statusCode, 200);
   assert.equal(JSON.parse(response.body).skipped, "NOT_FOUND");
   assert.equal(state.behaviour.addedChanges.length, 0);
+});
+
+/* ---------------- licensing ---------------- */
+
+const STAFF = "jordan@advtracking.net";
+
+test("the license action needs a proven session and nothing else", async () => {
+  // No clearance groups at all: the license check must still answer, because it
+  // is what decides whether the add-in offers anything else.
+  const { deps, context } = harness({ securityGroups: [] });
+  const response = await handleEvent(httpEvent("license"), context, deps);
+  const payload = body(response);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(payload.data.staff, false);
+  assert.equal(payload.data.licensed, true);
+  assert.equal(payload.data.setupAllowed, false);
+  assert.equal(payload.data.domain, "example.com");
+});
+
+test("license reports staff for an Advantage One domain", async () => {
+  const session = { database: "tenant_a", userName: STAFF, sessionId: "session-1", server: "my.geotab.test" };
+  const { deps, context } = harness({
+    users: [{ id: "u1", name: STAFF, securityGroups: [{ id: "GroupEverythingSecurityId" }] }]
+  });
+  const payload = body(await handleEvent(httpEvent("license", { session }), context, deps));
+
+  assert.equal(payload.data.staff, true);
+  assert.equal(payload.data.setupAllowed, true);
+  assert.equal(payload.data.domain, "advtracking.net");
+});
+
+test("license also answers for a database that is not onboarded", async () => {
+  const session = { database: "brand_new", userName: STAFF, sessionId: "session-1", server: "my.geotab.test" };
+  const { deps, context } = harness({
+    users: [{ id: "u1", name: STAFF, securityGroups: [{ id: "GroupEverythingSecurityId" }] }]
+  });
+  const payload = body(await handleEvent(httpEvent("license", { session }), context, deps));
+
+  assert.equal(payload.data.onboarded, false);
+  assert.equal(payload.data.licensed, false);
+  assert.equal(payload.data.setupAllowed, true, "staff can set it up from here");
+});
+
+test("license shows a tenant why they cannot use the service", async () => {
+  const config = createFakeConfig({});
+  delete config.customers.tenant_a.license;
+  const { deps, context } = harness({ config });
+  const payload = body(await handleEvent(httpEvent("license"), context, deps));
+
+  assert.equal(payload.data.staff, false);
+  assert.equal(payload.data.licensed, false);
+  assert.match(payload.data.message, /Please contact your CSR to enabled your license/);
+});
+
+test("a tenant cannot call the staff-only setup", async () => {
+  const { deps, context, configWriter, secretPublisher } = harness();
+  const response = await handleEvent(
+    httpEvent("saveWorkerCredentials", { payload: { workerUserName: "svc@customer.com", workerPassword: "x" } }),
+    context,
+    deps
+  );
+
+  assert.equal(response.statusCode, 403);
+  assert.equal(body(response).error.code, "ADDIN_ACCESS_DENIED");
+  assert.equal(configWriter.writes.length, 0);
+  assert.equal(secretPublisher.secrets.length, 0);
+});
+
+test("staff setup stores the secret and licenses the database", async () => {
+  const session = { database: "tenant_a", userName: STAFF, sessionId: "session-1", server: "my.geotab.test" };
+  const { deps, context, configWriter, secretPublisher } = harness({
+    users: [{ id: "u1", name: STAFF, securityGroups: [{ id: "GroupEverythingSecurityId" }] }]
+  });
+  const response = await handleEvent(
+    httpEvent("saveWorkerCredentials", {
+      session,
+      payload: { workerUserName: "svc-unassign@customer.com", workerPassword: "s3cret", timeZone: "America/Toronto" }
+    }),
+    context,
+    deps
+  );
+  const payload = body(response);
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(payload.data.licensed, true);
+  assert.equal(payload.data.secretCreated, true, "the fake secret store starts empty");
+  assert.equal(secretPublisher.secrets.length, 1);
+  assert.equal(secretPublisher.secrets[0].name, "unassign/tenant_a");
+  assert.equal(configWriter.writes.length, 1);
+  const record = configWriter.stored().customers.tenant_a;
+  assert.equal(record.license.source, "addin-panel");
+  assert.equal(record.workerUserName, "svc-unassign@customer.com");
+  assert.equal(JSON.stringify(configWriter.stored()).includes("s3cret"), false, "the password stays in Secrets Manager");
+});
+
+test("an unlicensed database is refused on every tenant action", async () => {
+  const config = createFakeConfig({});
+  delete config.customers.tenant_a.license;
+  const { deps, context, lines } = harness({ config });
+
+  for (const action of ["listSchedules", "listAssignments", "unassign"]) {
+    const response = await handleEvent(httpEvent(action, { payload: {} }), context, deps);
+    assert.equal(response.statusCode, 403, action);
+    assert.equal(body(response).error.code, "LICENSE_REQUIRED", action);
+  }
+  assert.deepEqual(outcomes(lines), ["denied", "denied", "denied"]);
+});
+
+test("staff may operate an unlicensed database", async () => {
+  const config = createFakeConfig({});
+  delete config.customers.tenant_a.license;
+  const session = { database: "tenant_a", userName: STAFF, sessionId: "session-1", server: "my.geotab.test" };
+  const { deps, context } = harness({
+    config,
+    users: [{ id: "u1", name: STAFF, securityGroups: [{ id: "GroupEverythingSecurityId" }] }]
+  });
+  const response = await handleEvent(httpEvent("listSchedules", { session }), context, deps);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(body(response).data.schedules, []);
+});
+
+test("a deployment can stop enforcing licences without a code change", async () => {
+  const config = createFakeConfig({});
+  delete config.customers.tenant_a.license;
+  config.licensing = { enforce: false };
+  const { deps, context } = harness({ config });
+
+  const response = await handleEvent(httpEvent("listSchedules"), context, deps);
+  assert.equal(response.statusCode, 200);
 });
 
 test("a broken payload or a broken secret fails the invocation so EventBridge retries", async () => {

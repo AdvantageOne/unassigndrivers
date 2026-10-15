@@ -197,13 +197,16 @@ Session material is only valid for the lifetime of the request; do not cache, lo
 ```
 
 HTTP status: 200 ok · 400 `BAD_REQUEST` · 401 `SESSION_INVALID` · 403 `DATABASE_NOT_ONBOARDED` /
-`ADDIN_ACCESS_DENIED` / `CLEARANCE_REQUIRED` · 404 `NOT_FOUND` · 409 `DUPLICATE` · 500 `INTERNAL` /
-`GEOTAB_ERROR`. Codes are stable strings; the add-in maps them to UI text.
+`ADDIN_ACCESS_DENIED` / `CLEARANCE_REQUIRED` / `LICENSE_REQUIRED` · 404 `NOT_FOUND` · 409
+`DUPLICATE` · 500 `INTERNAL` / `GEOTAB_ERROR`. Codes are stable strings; the add-in maps them to UI
+text.
 
 ### 5.3 Actions and payloads
 
 | Action | Payload | Behaviour |
 |---|---|---|
+| `license` | `{}` | Session-only (no clearance, no customer record needed): reports `staff`, `licensed`, `onboarded`, `workerConfigured`, `setupAllowed`, `enforce`, and the unlicensed message for a caller who needs one |
+| `saveWorkerCredentials` | `{ workerUserName, workerPassword, server, timeZone, licensed, notes }` | Staff-only. Verifies the credentials against MyGeotab, writes the tenant secret, then adds or updates the config record including its license |
 | `listSchedules` | `{}` | Lists the tenant's schedules from EventBridge, parsed and merged with their scope/timezone/kind; each item includes `name`, `arn`, `state`, `expression`, `timeZone`, `nextRun`, `scope`, `skipDriving`, `kind: "recurring" \| "one-time"` |
 | `createSchedule` | `{ scope: { groupIds: [] }, mode: "daily"\|"weekly", time: "23:00", timeZone: "America/New_York", days: [1,2,3], skipDriving: true, enabled: true }` | Upsert a recurring schedule; returns `name`, `arn`, `nextRuns` |
 | `updateSchedule` | `{ name, …same fields as create }` | Update in place (state, time, scope, `skipDriving`) |
@@ -321,6 +324,14 @@ equivalent to Scheduler rights, and keep them scoped to the Scheduler execution 
      names what was missing.
 6. Only then execute the action, and only against the session's own database.
 7. Log the decision: `{ requestId, action, database, userName, outcome: "allowed"|"denied", reason, matchedSecurityId }` — never the session id or any credential material.
+8. **Licensing is a separate gate**, applied after the clearance check on every tenant action: a
+   database without `license.licensed: true` is refused with `LICENSE_REQUIRED` for anyone who is not
+   staff. Staff are identified by the exact email domain of their user name (defaults
+   `advtracking.net`, `advantageone.tech`, overridable in the config's `licensing` block) and can both
+   use the service and register a database. `license` is session-only because it is what decides
+   whether the add-in offers anything at all; `saveWorkerCredentials` needs a proven session whose
+   domain is a staff one. Scheduled runs are deliberately **not** gated — a lapsed license must not
+   silently stop a customer's fleet process.
 
 ---
 
@@ -587,6 +598,10 @@ OpenTofu, one root per region, same module, variables only:
 | D-H | Leave the add-in's own scheduler as a fallback? | No — remove it; two schedulers create double-run risk and EventBridge is authoritative |
 | D-I | One schedule group per Geotab database (500/region quota) or a single group with prefixed names? | Group per database while tenant count is low; revisit if it approaches 400 |
 | D-J | Exclude the 294-filter catalog group `GroupSecurityId` from grant computation? | Yes (`ignoreCatalogGroup: true`) — the capture shows every filter there as `isAdd: true`, so trusting it would authorize every user |
+| D-K | Who may register a database and seed its worker credentials? | Advantage One staff only, by exact email domain (`advtracking.net`, `advantageone.tech`), overridable in the config's `licensing.staffDomains` |
+| D-L | Does an unlicensed database keep running its schedules? | Yes. The license gates the add-in's actions; a billing flag must not silently stop a fleet process. `licensing.enforce: false` disables the refusals while the add-in still shows the state |
+| D-M | Does the onboarding script license what it onboards? | Yes — whoever has AWS credentials and onboards a database is licensing it (`license.source: "onboard-script"`; the add-in panel writes `"addin-panel"`) |
+| D-N | Where does the worker password live? | Secrets Manager only. The config keeps `workerUserName` for display, and a test asserts the password never reaches it |
 
 ---
 

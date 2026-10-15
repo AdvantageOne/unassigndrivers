@@ -119,6 +119,12 @@ needs nothing external.
 existing schedules — migrate them deliberately (list, create, delete) rather than changing the rule
 in place.
 
+**Change who counts as staff, or how licensing works**
+`src/lambda/lib/licensing.js` (domain parsing, the staff list, what "licensed" means) and, for the
+deployment-side switches, the `licensing` block in the tenant config (`staffDomains`, `enforce`).
+The rules are tested in `test/license.test.js`; the service message, the client's `ERROR_TEXT` and
+the add-in's modal all carry the same sentence, and one test asserts that they still agree.
+
 **Change the authorization rules**
 `src/lambda/actions/auth.js` and the `addIn.clearance` block in the tenant config
 (`requireIsAdd`, `allowEverythingGroup`, `ignoreCatalogGroup`). Update the table-driven tests in
@@ -201,7 +207,16 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
     six characters or fewer, so `OPTIONS` cannot be listed — that is not a bug to work around, and
     Lambda answers the preflight itself. Adding `access-control-*` headers in `src/lambda/http.js`
     produces duplicate headers and a browser-level rejection.
-13. **Offline green does not mean the call site is covered.** Two deploy-script bugs (the binary
+13. **Licensing is enforced by the service, not by the modal.** Every tenant action returns
+    `403 LICENSE_REQUIRED` when `customers.<db>.license.licensed !== true`, staff are exempt, and
+    scheduled runs deliberately keep firing (a billing flag must not stop a fleet process). The
+    unlicensed sentence lives in three places — `MESSAGE_UNLICENSED` in
+    `src/lambda/actions/license.js`, `ERROR_TEXT.LICENSE_REQUIRED` in `src/addin/api-client.js` and
+    the modal markup in `unassignDrivers.html` — and a test fails if they drift apart.
+14. **The setup panel writes twice, in this order:** Secrets Manager first, then the config record.
+    Reversing it would leave a database pointing at a secret that does not exist, which breaks every
+    scheduled run. It also verifies the credentials against MyGeotab before either write.
+15. **Offline green does not mean the call site is covered.** Two deploy-script bugs (the binary
     plan file fed to jq, the artifact check killed by `pipefail`) passed every selftest because the
     *function* was exercised and its caller was not. When you change an argument or a contract, add
     an assertion on the call site.
@@ -216,10 +231,14 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 | Authorization decision (Everything marker, add-in filter, revoked, catalog trap, group selected by id, failures) | tested (`test/authorize.test.js`) |
 | Handler routing, envelope, CORS, session gate, scheduler path outcomes | tested (`test/handler.test.js`) |
 | Config/secret validation, caching, redaction | tested |
+| Licensing: staff domains, the gate, the setup write path, the shared copy | tested (`test/license.test.js`) |
+| Configuration writes (ETag guard, retry, no lost writes, no in-place edits) | tested (`test/config-writer.test.js`) |
+| Add-in client contract (request shape, envelope, error codes, timeout, action names) | tested (`test/api-client.test.js`) |
 | Add-in build integrity (regions match `src/`, markers intact, globals present) | tested |
 | OpenTofu for both regions | `tofu fmt -check` clean; `tofu validate` passes in `infra/live/ca` and `infra/live/us` on AWS provider 6.69.0 (`~> 6.69`, hashes locked for darwin/linux on arm64 and amd64). No apply: no credentials here, so the first `plan` against the live account is still owed |
 | Scripts | `bash -n` clean; 56 + 52 + 20 self-test assertions pass (state-key prefix, backend-config/key agreement, lambda artifact, plan-summary conversion, CORS preflight parsing); the plan summary was also exercised against a real `tofu plan` + `tofu show -json`, and the CORS check's branches against stubs; live AWS paths not exercised |
-| Add-in server-mode card (create/list/edit/delete/run-now) | **Not verified against a live MyGeotab.** Syntax-checked, every element id it references exists, and the client it uses is unit tested — but it needs a real database to be called done |
+| Add-in server-mode cards (create/list/edit/delete/run-now, the staff setup panel, the unlicensed modal) | **Not verified against a live MyGeotab.** Syntax-checked, every element id it references exists, the client it uses is unit tested, and a test asserts the unlicensed sentence matches the service's — but the UI needs a real database to be called done |
+| Licensing against a real tenant | **Not verified.** The decisions are tested and the staff domain check is exact, but nobody has yet seen the modal in a browser or the setup panel save for real |
 | Clearance against real users | **Not verified.** Needs the two-user proof in the deployment guide §2.2, which is also what proves `addIn.securityId.id` is right |
 
 ## 9. Running things locally

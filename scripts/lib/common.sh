@@ -404,16 +404,22 @@ secret_payload_json() { # <database> <server> <userName> <password>
     '{database: $database, server: $server, userName: $userName, password: $password}'
 }
 
-customer_entry_json() { # <database> <server> <timeZone> <createdBy> <notes> [createdAt]
-  local db="$1" server="$2" tz="$3" createdBy="$4" notes="${5:-}" createdAt="${6:-}"
+# The record the onboarding script writes for a customer. Someone with AWS
+# credentials onboarding a database is licensing it, so the license block is
+# written here as licensed; the add-in's staff-only setup panel does the same
+# with source "addin-panel".
+customer_entry_json() { # <database> <server> <timeZone> <createdBy> <notes> [createdAt] [workerUserName]
+  local db="$1" server="$2" tz="$3" createdBy="$4" notes="${5:-}" createdAt="${6:-}" worker="${7:-}"
   [ -n "$createdAt" ] || createdAt="$(now_iso8601)"
   jq -n --arg key "$db" --arg server "$server" --arg tz "$tz" --arg createdBy "$createdBy" \
-        --arg notes "$notes" --arg createdAt "$createdAt" \
+        --arg notes "$notes" --arg createdAt "$createdAt" --arg worker "$worker" \
     '{key: $key,
       geotab: { database: $key, server: $server },
       secretName: ("unassign/" + $key),
       enabled: true,
       timeZone: $tz,
+      workerUserName: $worker,
+      license: { licensed: true, source: "onboard-script", updatedAt: $createdAt, updatedBy: $createdBy, notes: "" },
       createdAt: $createdAt,
       createdBy: $createdBy,
       notes: $notes}'

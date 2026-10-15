@@ -40,6 +40,65 @@ function createConfigLoader(options) {
   };
 }
 
+/**
+ * Reads and writes the tenant registry. `read` keeps the ETag so a write can be
+ * conditional, which is what makes concurrent onboarding safe.
+ */
+function createConfigReadWrite(options) {
+  let s3;
+  function client() {
+    if (!s3) s3 = s3ClientFactory();
+    return s3;
+  }
+  return {
+    async read() {
+      const { GetObjectCommand } = require("@aws-sdk/client-s3");
+      try {
+        const result = await client().send(new GetObjectCommand({ Bucket: options.bucket, Key: options.key }));
+        return { text: await result.Body.transformToString(), etag: result.ETag || null };
+      } catch (error) {
+        const name = error && (error.name || error.code);
+        if (name === "NoSuchKey" || name === "NoSuchBucket" || name === "NotFound") {
+          throw appError(
+            "INTERNAL",
+            `The configuration object s3://${options.bucket}/${options.key} does not exist. Run scripts/deploy.sh for this region.`
+          );
+        }
+        throw error;
+      }
+    },
+    async write(text, etag) {
+      const { PutObjectCommand } = require("@aws-sdk/client-s3");
+      const input = {
+        Bucket: options.bucket,
+        Key: options.key,
+        Body: text,
+        ContentType: "application/json",
+        ServerSideEncryption: "AES256"
+      };
+      if (etag) input.IfMatch = etag;
+      const result = await client().send(new PutObjectCommand(input));
+      return { etag: result.ETag || null };
+    }
+  };
+}
+
+function createSecretPublisherAdapter() {
+  let client;
+  return {
+    async createSecret(input) {
+      const { SecretsManagerClient, CreateSecretCommand } = require("@aws-sdk/client-secrets-manager");
+      if (!client) client = new SecretsManagerClient({});
+      return client.send(new CreateSecretCommand(input));
+    },
+    async putSecretValue(input) {
+      const { SecretsManagerClient, PutSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
+      if (!client) client = new SecretsManagerClient({});
+      return client.send(new PutSecretValueCommand(input));
+    }
+  };
+}
+
 function createSecretFetcher() {
   let client;
   return async function fetchSecret(secretId) {
@@ -75,4 +134,10 @@ function createSchedulerAdapter(options) {
   };
 }
 
-module.exports = { createConfigLoader, createSecretFetcher, createSchedulerAdapter };
+module.exports = {
+  createConfigLoader,
+  createConfigReadWrite,
+  createSecretFetcher,
+  createSecretPublisherAdapter,
+  createSchedulerAdapter
+};

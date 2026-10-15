@@ -66,4 +66,30 @@ function createSecretStore(options) {
   return { get, invalidate };
 }
 
-module.exports = { createSecretStore, parseSecret };
+/**
+ * Creates or replaces a tenant secret. Used only by the staff-only setup action,
+ * and only after the credentials have been proven against MyGeotab.
+ *
+ * @param {object} options
+ * @param {object} options.client  { createSecret, putSecretValue }
+ */
+function createSecretPublisher(options) {
+  const client = options.client;
+
+  async function put(secretName, payload) {
+    const SecretString = typeof payload === "string" ? payload : JSON.stringify(payload);
+    try {
+      await client.createSecret({ Name: secretName, SecretString });
+      return { name: secretName, created: true };
+    } catch (error) {
+      const name = (error && (error.name || error.code)) || "";
+      if (name !== "ResourceExistsException") throw error;
+    }
+    await client.putSecretValue({ SecretId: secretName, SecretString });
+    return { name: secretName, created: false };
+  }
+
+  return { put };
+}
+
+module.exports = { createSecretStore, createSecretPublisher, parseSecret };

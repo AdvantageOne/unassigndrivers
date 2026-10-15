@@ -21,10 +21,13 @@ const { createConfigStore } = require("./lib/config-store");
 const { createSecretStore } = require("./lib/secrets");
 const { createGeotab, normaliseServer, toCoreApi } = require("./lib/geotab");
 const { createScheduler } = require("./lib/scheduler");
+const { createConfigWriter } = require("./lib/config-writer");
+const { createSecretPublisher } = require("./lib/secrets");
 const { asAppError, appError } = require("./lib/errors");
 const naming = require("./lib/naming");
 const http = require("./http");
 const auth = require("./actions/auth");
+const licenseActions = require("./actions/license");
 const scheduleActions = require("./actions/schedules");
 const unassign = require("./actions/unassign");
 const assignments = require("./actions/assignments");
@@ -33,11 +36,30 @@ const { health } = require("./actions/health");
 /** Shown as "By" in the add-in's Run history (decision D7: keep the label). */
 const RUNNER_NAME = "Unassign Service";
 
-const DENIED_CODES = new Set(["SESSION_INVALID", "ADDIN_ACCESS_DENIED", "CLEARANCE_REQUIRED", "DATABASE_NOT_ONBOARDED"]);
+const DENIED_CODES = new Set([
+  "SESSION_INVALID",
+  "ADDIN_ACCESS_DENIED",
+  "CLEARANCE_REQUIRED",
+  "DATABASE_NOT_ONBOARDED",
+  "LICENSE_REQUIRED"
+]);
 
-/** Actions reachable from the add-in. `write` only documents intent for logs. */
+/**
+ * Actions reachable from the add-in. `access` is the gate, strongest last:
+ *   public   no session at all (health)
+ *   session  a proven session, nothing else — the license check, which is what
+ *            decides whether anything else is offered
+ *   staff    a proven session whose email domain is an Advantage One one
+ *   addin    (default) proven session + the add-in's Geotab clearance + a
+ *            license for the database
+ */
 const ACTIONS = {
-  health: { auth: false, run: (context) => health(context) },
+  health: { access: "public", run: (context) => health(context) },
+  license: { access: "session", run: (context) => licenseActions.checkLicense(context) },
+  saveWorkerCredentials: {
+    access: "staff",
+    run: (context, payload) => licenseActions.saveWorkerCredentials(context, payload)
+  },
   listSchedules: { run: (context) => scheduleActions.listSchedules(context) },
   createSchedule: { run: (context, payload) => scheduleActions.createSchedule(context, payload) },
   updateSchedule: { run: (context, payload) => scheduleActions.updateSchedule(context, payload) },
@@ -99,11 +121,23 @@ function buildDeps(options) {
       dlqArn: env.schedulerDlqArn,
       retry: { maxAttempts: env.schedulerRetryMaxAttempts, maxAgeSeconds: env.schedulerRetryMaxAgeSeconds }
     });
+  const configReadWrite =
+    overrides.configReadWrite ||
+    require("./aws").createConfigReadWrite({ bucket: env.configBucket, key: env.configKey, region: env.region });
+  const configWriter =
+    overrides.configWriter ||
+    createConfigWriter({ read: () => configReadWrite.read(), write: (text, etag) => configReadWrite.write(text, etag) });
+  const secretPublisher =
+    overrides.secretPublisher ||
+    createSecretPublisher({ client: overrides.secretWriteClient || require("./aws").createSecretPublisherAdapter() });
+
   return {
     env,
     logger,
     configStore,
     secretStore,
+    configWriter,
+    secretPublisher,
     geotabFor,
     scheduler,
     now: overrides.now || (() => new Date())
@@ -137,8 +171,44 @@ async function handleHttp(request, deps, requestId) {
   }
 
   try {
-    if (definition.auth === false) {
+    if (definition.access === "public") {
       const data = await definition.run({ env: deps.env, configStore: deps.configStore, now: deps.now, logger, requestId });
+      return http.ok(data, { requestId, action, origin, allowedOrigins });
+    }
+
+    // "session" (the license check) and "staff" (setup) trust nothing about the
+    // caller beyond a proven session and its email domain, so they work for
+    // databases that are not onboarded yet.
+    if (definition.access === "session" || definition.access === "staff") {
+      const session = auth.requireSession(body.session);
+      const config = await deps.configStore.get();
+      const customer = (config.customers && config.customers[session.database]) || null;
+      const server = resolveServer(session, customer);
+      const geotab = deps.geotabFor(server);
+      await auth.proveSession({ session, geotab, logger });
+
+      const context = {
+        env: deps.env,
+        logger: logger.child({ database: session.database, userName: session.userName }),
+        now: deps.now,
+        requestId,
+        session,
+        config,
+        customer,
+        server,
+        geotabFor: deps.geotabFor,
+        configStore: deps.configStore,
+        secretStore: deps.secretStore,
+        configWriter: deps.configWriter,
+        secretPublisher: deps.secretPublisher
+      };
+      const data = await definition.run(context, body.payload || {});
+      logger.info("action completed", {
+        outcome: "ok",
+        database: session.database,
+        code: "OK",
+        staff: Boolean(data && data.staff)
+      });
       return http.ok(data, { requestId, action, origin, allowedOrigins });
     }
 
@@ -147,6 +217,7 @@ async function handleHttp(request, deps, requestId) {
     const server = resolveServer(session, customer);
     const geotab = deps.geotabFor(server);
     const caller = await auth.authorize({ session, config, geotab, logger });
+    const license = licenseActions.assertLicensed({ session, config, logger });
     const sessionClient = geotab.session({
       database: session.database,
       userName: session.userName,
@@ -165,10 +236,13 @@ async function handleHttp(request, deps, requestId) {
       caller,
       api: toCoreApi(sessionClient),
       geotabFor: deps.geotabFor,
-      scheduler: deps.scheduler
+      scheduler: deps.scheduler,
+      secretStore: deps.secretStore,
+      configWriter: deps.configWriter,
+      secretPublisher: deps.secretPublisher
     };
     const data = await definition.run(context, body.payload || {});
-    logger.info("action completed", { outcome: "ok", database: session.database, code: "OK" });
+    logger.info("action completed", { outcome: "ok", database: session.database, code: "OK", licensed: license.licensed });
     return http.ok(data, { requestId, action, origin, allowedOrigins });
   } catch (error) {
     const app = asAppError(error);

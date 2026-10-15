@@ -133,6 +133,48 @@ The service account must be a dedicated MyGeotab user with Administrator clearan
 Group access — it needs to change driver assignments and write the run log. `--dry-run` prints the
 resulting configuration without writing anything.
 
+### Licensing, and setting a database up from the add-in
+
+A database is **licensed** when its record in `config/customers.json` carries
+`"license": { "licensed": true }`. Without it, everyone who is not Advantage One staff is refused
+with `403 LICENSE_REQUIRED` and the add-in shows a modal saying *"Please contact your CSR to enabled
+your license"*. Two ways to license a database:
+
+1. **`scripts/onboard-customer.sh`** — whoever has AWS credentials and onboards a database is
+   licensing it, so the record it writes is licensed (`"source": "onboard-script"`).
+2. **The add-in's setup panel**, for staff (see below): it registers the database and licenses it in
+   one step (`"source": "addin-panel"`).
+
+**Staff** are identified by the email domain of their MyGeotab user name, exactly (not by suffix —
+`someone@not-advtracking.net` is not staff). The defaults are `advtracking.net` and
+`advantageone.tech`, overridable in the config:
+
+```json
+"licensing": { "staffDomains": ["advtracking.net", "advantageone.tech"], "enforce": true }
+```
+
+A staff member opening the add-in in a database with no worker configured sees a **Service account
+setup** card (it needs only a proven session and a staff domain, not the add-in's Geotab clearance,
+so staff can register databases before `addIn.securityId.id` is configured): MyGeotab user name, password, server, and a "License this database" checkbox. Saving it
+verifies the credentials against MyGeotab first, then writes the secret `unassign/<database>`, then
+adds or updates the record — `enabled: true`, `workerUserName` (display only, never a credential),
+`timeZone` and the license block. A credential that MyGeotab rejects is reported and nothing is
+written. The password exists only in that request and in Secrets Manager: never in the config, never
+in a log.
+
+Two consequences worth knowing:
+
+- **Enforcement covers the add-in's actions, not scheduled runs.** An unlicensed database keeps
+  running its existing schedules; stopping a customer's fleet process is a billing decision, not
+  something a flag should do silently. Setting `"enforce": false` also stops the refusals while the
+  add-in still shows the state.
+- **The Lambda can now write.** Its role may create or update `unassign/*` secrets and write the one
+  config object. Both are reachable only through the staff-only action, behind a proven MyGeotab
+  session.
+
+To unlicense a database, set `"licensed": false` (the add-in reads the config at most 60 seconds
+later); to disable it entirely, set `"enabled": false`.
+
 To stop a customer without losing its history:
 
 ```bash
@@ -195,6 +237,10 @@ Log lines are JSON and include `outcome`, `action`, `database`, `unassigned`, `s
 | Browser console: "Access-Control-Allow-Origin header contains multiple values" | Something re-added CORS headers in the function, on top of the Function URL's | Delete them from `src/lambda/http.js`; the Function URL is the only owner |
 | `ValidationException: Value '[POST, OPTIONS]' at 'cors.allowMethods'` during apply | `OPTIONS` was added to `allow_methods` | Keep `allow_methods = ["POST"]`; Lambda answers the preflight and rejects `OPTIONS` (members are capped at six characters) |
 | `401 SESSION_INVALID` | The forwarded session expired, or `sessionId` was not sent | Confirm the add-in's `getSession()` shape (§2.3) |
+| Add-in shows the unlicensed modal for a database you licensed | The record has no `license.licensed: true`, or the add-in cached the config (≤ 60 s) | Check `jq .customers.\"<db>\".license` in the config; reload the page after a change |
+| Staff member sees no setup card | Their user name's domain is not in `licensing.staffDomains` (exact match) | Fix the domain list in the config, or use an Advantage One account |
+| `403 LICENSE_REQUIRED` from the add-in after licensing | The Lambda's config cache (60 s) or the S3 write did not land | Confirm the object in S3, then retry |
+| `saveWorkerCredentials` returns "MyGeotab rejected those credentials" | Wrong password, wrong database, or the account is locked | Nothing was written — check the account in MyGeotab and try again |
 | `403 DATABASE_NOT_ONBOARDED` | The database is not in the config, or `enabled` is false | Onboard it, or check the config |
 | Scheduled slot never fired | No schedule for that scope/time, schedule group missing, or Lambda permission missing | `aws scheduler list-schedules --group-name …`; check the Scheduler execution role in `infra/modules/unassign` |
 | Two runs for one slot | A tenant still runs the legacy in-browser scheduler with a signed-in tab | Set `SERVER_API_BASE`, or set the add-in's schedule to disabled in Geotab |

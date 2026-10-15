@@ -14,6 +14,7 @@ written back to the tenant's own MyGeotab database as a run log.
 | Tenant config | `s3://<deployment>-config/config/customers.json` |
 | Credentials | One AWS Secrets Manager secret per tenant (`unassign/<database>`) |
 | Deploy | `scripts/deploy.sh` (asks Canada or United States, then plans and applies) |
+| Licensing | Per database, in the deployment config. Advantage One staff can register a database and license it from the add-in's setup panel; anyone else on an unlicensed database sees a "contact your CSR" message instead of the scheduler |
 | Support | jordan@advtracking.net |
 
 Docs: **[deployment guide](docs/aws-deployment-guide.md)** for operating it,
@@ -84,8 +85,8 @@ source and rebuild, or `pnpm test` will fail with a clear message.
 ## Status
 
 - Implemented: shared core extraction with tests, the Lambda service (all add-in actions plus the
-  scheduled path), OpenTofu for both regions, deploy/onboard/offboard scripts, the add-in's
-  service mode, and these docs.
+  scheduled path), per-database licensing with the staff-only setup panel, OpenTofu for both
+  regions, deploy/onboard/offboard scripts, the add-in's service mode, and these docs.
 - Pending, and requiring access this repository does not have: resolving this add-in's Geotab
   `securityId.id` (the deployment ships with `""`, which denies everyone until it is set), proving
   the clearance check against a real admin and a real restricted user, and the pilot/cutover.

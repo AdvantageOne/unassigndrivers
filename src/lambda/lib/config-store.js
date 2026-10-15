@@ -39,6 +39,9 @@ function validateConfig(config) {
     if (typeof customer.enabled !== "boolean") {
       throw appError("INTERNAL", `Customer "${key}" must set enabled to true or false.`);
     }
+    if (customer.license != null && typeof customer.license.licensed !== "boolean") {
+      throw appError("INTERNAL", `Customer "${key}" has a license block without a boolean "licensed".`);
+    }
   }
   return config;
 }

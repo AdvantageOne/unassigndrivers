@@ -295,6 +295,8 @@ const DEFAULT_CONFIG = {
       secretName: "unassign/tenant_a",
       enabled: true,
       timeZone: "America/Toronto",
+      workerUserName: "svc-unassign@example.com",
+      license: { licensed: true, source: "test", updatedAt: "2026-10-01T00:00:00.000Z", updatedBy: "test", notes: "" },
       createdAt: "2026-10-01T00:00:00.000Z",
       createdBy: "arn:aws:iam::000000000000:user/test",
       notes: ""

@@ -126,8 +126,11 @@ long_db="$(printf 'd%.0s' {1..65})"
   st_eq "secret payload userName" "svc@advone.io" "$(printf '%s' "$payload" | jq -r .userName)"
   st_eq "secret payload password" "0123456789abcdef" "$(printf '%s' "$payload" | jq -r .password)"
 
-  entry="$(customer_entry_json "simplot_prod" "my.geotab.com" "America/New_York" "arn:aws:iam::1:user/ops" "pilot tenant" "2026-10-15T00:00:00Z")"
+  entry="$(customer_entry_json "simplot_prod" "my.geotab.com" "America/New_York" "arn:aws:iam::1:user/ops" "pilot tenant" "2026-10-15T00:00:00Z" "svc-unassign@advone.io")"
   st_eq "entry key" "simplot_prod" "$(printf '%s' "$entry" | jq -r .key)"
+  st_eq "entry licenses the database" "true" "$(printf '%s' "$entry" | jq -r .license.licensed)"
+  st_eq "entry records who licensed it" "onboard-script" "$(printf '%s' "$entry" | jq -r .license.source)"
+  st_eq "entry records the worker user name" "svc-unassign@advone.io" "$(printf '%s' "$entry" | jq -r .workerUserName)"
   st_eq "entry secretName" "unassign/simplot_prod" "$(printf '%s' "$entry" | jq -r .secretName)"
   st_eq "entry geotab.database" "simplot_prod" "$(printf '%s' "$entry" | jq -r .geotab.database)"
   st_true "entry enabled is a boolean true" test "$(printf '%s' "$entry" | jq -r '.enabled | type')" = "boolean"
@@ -355,7 +358,7 @@ write_secret_value() {
 register_customer() {
   local entry in out
   entry="$(mktemp "${TMPDIR:-/tmp}/unassign-entry.XXXXXX")"
-  customer_entry_json "$DATABASE" "$SERVER" "$TIMEZONE" "$CREATED_BY" "$NOTES" > "$entry"
+  customer_entry_json "$DATABASE" "$SERVER" "$TIMEZONE" "$CREATED_BY" "$NOTES" "" "$USER_NAME" > "$entry"
   step "Registering $DATABASE in s3://$CONFIG_BUCKET/$CONFIG_KEY"
   config_update "$CONFIG_BUCKET" merge_onboard_customer "$DATABASE" "$entry"
   rm -f "$entry"
@@ -378,7 +381,7 @@ verify_registration() {
     die_fix "the write to s3://$CONFIG_BUCKET/$CONFIG_KEY did not stick: customer '$DATABASE' is missing" \
             "re-run $SCRIPT_NAME --region $REGION_CODE, and check the bucket versioning/retention policy"
   fi
-  ok "config contains: $(jq -c --arg k "$DATABASE" '.customers[$k] | {key, secretName, enabled, timeZone, server: .geotab.server}' "$file")"
+  ok "config contains: $(jq -c --arg k "$DATABASE" '.customers[$k] | {key, secretName, enabled, timeZone, licensed: .license.licensed, server: .geotab.server}' "$file")"
   addin_id="$(jq -r '.addIn.securityId.id // ""' "$file")"
   if [ -z "$addin_id" ]; then
     warn "addIn.securityId.id is still empty in this config: the Lambda denies every user until this add-in's Geotab ViewSecurityId is captured (brief §7 Step 0)"
@@ -390,7 +393,7 @@ verify_registration() {
 dry_run_preview() {
   local payload entry in out rc
   payload="$(secret_payload_json "$DATABASE" "$SERVER" "$USER_NAME" "$PASSWORD")"
-  entry="$(customer_entry_json "$DATABASE" "$SERVER" "$TIMEZONE" "$CREATED_BY" "$NOTES")"
+  entry="$(customer_entry_json "$DATABASE" "$SERVER" "$TIMEZONE" "$CREATED_BY" "$NOTES" "" "$USER_NAME")"
 
   step "Dry run — nothing is written"
   info "secret payload for $SECRET_NAME (value of 'password' redacted):"

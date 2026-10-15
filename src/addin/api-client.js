@@ -23,6 +23,7 @@
     DATABASE_NOT_ONBOARDED: "This database is not set up for automatic runs yet. Contact Advantage One.",
     ADDIN_ACCESS_DENIED: "Your MyGeotab role does not grant access to this add-in.",
     CLEARANCE_REQUIRED: "Your MyGeotab role is missing a clearance this action needs.",
+    LICENSE_REQUIRED: "Please contact your CSR to enabled your license",
     NOT_FOUND: "That schedule no longer exists. Refresh the list.",
     DUPLICATE: "A schedule already exists for that group at that time.",
     GEOTAB_ERROR: "MyGeotab rejected the request.",
@@ -118,7 +119,7 @@
             if (!response.ok) {
               throw ApiError("INTERNAL", "The scheduling service returned HTTP " + response.status + ".", response.status);
             }
-            return body ? body.data : {};
+            return (body && body.data) || {};
           });
         }, function (error) {
           timeout.cancel();
@@ -140,6 +141,8 @@
       deleteSchedule: function (payload) { return request("deleteSchedule", payload); },
       unassign: function (payload) { return request("unassign", payload || {}); },
       listAssignments: function (payload) { return request("listAssignments", payload || {}); },
+      license: function () { return request("license", {}); },
+      saveWorkerCredentials: function (payload) { return request("saveWorkerCredentials", payload); },
       health: function () { return request("health", {}); }
     };
   }

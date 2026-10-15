@@ -79,18 +79,17 @@ function pickGroup(result, groupId) {
 }
 
 /**
+ * Proves the forwarded session is real by reading the signed-in user through it.
+ * Every action that trusts anything about the caller goes through here, including
+ * the license check: without it, a caller could simply claim to be staff.
+ *
  * @param {object} context
- * @param {object} context.session     what the add-in forwarded
- * @param {object} context.config      the deployment configuration
- * @param {object} context.geotab      a client from lib/geotab for the caller's server
- * @returns {Promise<{database, userName, matchedSecurityId, reason, groups}>}
+ * @param {object} context.session  what the add-in forwarded
+ * @param {object} context.geotab   a client from lib/geotab for the caller's server
+ * @returns {Promise<{session, client, user}>}
  */
-async function authorize(context) {
+async function proveSession(context) {
   const session = requireSession(context.session);
-  const addIn = (context.config && context.config.addIn) || {};
-  const clearance = addIn.clearance || {};
-  const logger = context.logger;
-
   const client = context.geotab.session({
     database: session.database,
     userName: session.userName,
@@ -109,6 +108,24 @@ async function authorize(context) {
     throw appError("SESSION_INVALID", `MyGeotab rejected the session: ${error.message}`);
   }
   if (!user) throw appError("SESSION_INVALID", `MyGeotab has no user named "${session.userName}".`);
+  return { session, client, user };
+}
+
+/**
+ * Session proof plus the add-in clearance check.
+ *
+ * @param {object} context
+ * @param {object} context.session  what the add-in forwarded
+ * @param {object} context.config   the deployment configuration
+ * @param {object} context.geotab   a client from lib/geotab for the caller's server
+ * @returns {Promise<{database, userName, matchedSecurityId, reason, groups}>}
+ */
+async function authorize(context) {
+  const addIn = (context.config && context.config.addIn) || {};
+  const clearance = addIn.clearance || {};
+  const logger = context.logger;
+
+  const { session, client, user } = await proveSession(context);
 
   const groupIds = Array.from(
     new Set(((user.securityGroups || []).map((group) => group && group.id).filter(Boolean)))
@@ -153,4 +170,12 @@ async function authorize(context) {
   };
 }
 
-module.exports = { authorize, decideClearance, decideForGroup, requireSession, CATALOG_GROUP_ID, EVERYTHING_SECURITY_ID };
+module.exports = {
+  authorize,
+  proveSession,
+  decideClearance,
+  decideForGroup,
+  requireSession,
+  CATALOG_GROUP_ID,
+  EVERYTHING_SECURITY_ID
+};
