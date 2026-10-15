@@ -54,20 +54,66 @@ time; the tenant-visible features (preview, manual unassign, run history) surviv
   per-schedule operation rate 10 TPS; 500 schedule groups/region; `ListSchedules` 50 TPS.
 - `CreateSchedule` on an existing name returns **409 Conflict** → use `UpdateSchedule` for upserts.
 
-**MyGeotab request shapes captured from a live session** (`docs/exampleSecurityFilterCheck.txt`,
-the HAR in `docs/`; it contains 45 `apiv1` requests but **no response bodies**, so responses must be
-captured again in Step 0):
+**The security-filter check, captured from a live MyGeotab session** (`docs/exampleSecurityFilterCheck.txt`,
+updated 2026-10-15: one `ExecuteMultiCall` with its full response. The file stays git-ignored — it
+carries a customer database name and a 30-minute-lived IAM bearer token):
 
 ```json
-{ "method": "Get", "params": { "typeName": "User",
-  "search": { "name": "matt@advtracking.net" },
-  "propertySelector": { "fields": ["id", "securityGroups"] } } }
+{ "method": "ExecuteMultiCall", "params": { "calls": [
+  { "method": "Get", "params": { "typeName": "Group", "search": { "id": "GroupSecurityId" } } },
+  { "method": "Get", "params": { "typeName": "SystemSettings" } },
+  { "method": "GetVersionInformation", "params": {} },
+  { "method": "GetFeatureFlagAuthenticated", "params": { "flags": [ "…" ] } }
+] } }
+```
 
-{ "method": "Get", "params": { "typeName": "AddIn" } }          // add-ins visible to this session's user
+That capture came from the MyGeotab web app (headers `database: <db>`, `page-name: clearances`,
+`authorization: Bearer <IAM token>`). **This service must not use the bearer path** — it passes the
+caller's session in the params instead: `credentials { database, userName, sessionId }`, exactly as
+the legacy client does.
 
-{ "method": "ExecuteMultiCall", "params": { "calls": [ { "method": "Get", "params": { "typeName": "SystemSettings" } } ] } }
+Response shape is JSON-RPC: `{ jsonrpc, id, result: [ perCall0, perCall1, … ] }`, one element per
+call. `result[0]` is the **array of groups**, not a single group — the capture's
+`search: { id: "GroupSecurityId" }` returned **23** groups. Always select by `id`, never by index.
+Each group carries:
 
-// every call carries the session: { "credentials": { "database": "simplot_prod", "userName": "…", "sessionId": "…" } }
+```json
+"securityFilters": [
+  { "isAdd": true,
+    "securityIdentifier": "SystemSettings",
+    "securityId": { "customPageName": "", "isSystemSecurityId": true,
+                    "version": "0000000000000003", "name": "SecurityIdSystemSettings",
+                    "id": "SecurityIdSystemSettingsId" } },
+  { "isAdd": true,
+    "securityId": { "customPageName": "Geotab Order Addin", "isSystemSecurityId": true,
+                    "name": "ViewSecurityId", "id": "acP6yyGZ42EmhgOePJfLP7w" } }
+]
+```
+
+What that capture proves (use it as the contract):
+
+- `isAdd` is the only flag present on a filter entry — no `isView`/`isEdit`/`isDelete`. Treat
+  `isAdd: true` as "granted".
+- `GroupSecurityId` (**Security**) holds all **294** filters and every one is `isAdd: true`: it is
+  the database-wide catalog, not a per-user grant. Exclude it, or every user looks authorized.
+- Clearance groups hold subsets with mixed flags: `GroupSupervisorSecurityId` 149 filters / 41 true,
+  `b279D` (Manager) 56 / 18, `GroupViewOnlySecurityId` 130 / 58, `GroupDriveUserSecurityId` 64 / 45,
+  `b299B` (L&L Administration) 46 / 0.
+- Administrator is a single marker filter on `GroupEverythingSecurityId`:
+  `{ isAdd: true, securityId: { id: "SecurityIdEverythingId", name: "SecurityIdEverythingId", customPageName: "undefined" } }`.
+- Add-in filters are keyed by `securityId.id` **and** `securityId.customPageName`; they carry no
+  `securityIdentifier`. In the capture: Geotab Order Addin `acP6yyGZ42EmhgOePJfLP7w`,
+  Advantage One Device Management Form `a8dEwkPkfvEiBqQ4YFFsCfg`, Bulk Edit Tool
+  `aXoGyYEAMVkON0T-2FmgO6A`, Data Connector `alCIkNp0MK0WuCVYu4WvLVw`, Geotab Fleet Card
+  `aWrH2h8M0REWv95c0gqqO_Q`, SGS Fleet Site `aQUlmtKSNs062NFj9FwxaTA`, camera add-in
+  `aA10aEA8Ebk2T1-7u3c_zUA`. **This add-in is not installed in the captured database**, so its own
+  filter id has to be read elsewhere (Step 0).
+
+User lookup, from the earlier browser capture (request side only):
+
+```json
+{ "method": "Get", "params": { "typeName": "User", "search": { "name": "<signed-in user>" },
+                              "propertySelector": { "fields": ["id", "securityGroups"] } } }
 ```
 
 ---
@@ -205,11 +251,9 @@ equivalent to Scheduler rights, and keep them scoped to the Scheduler execution 
   "deployment": { "name": "advone-ca-central", "region": "ca-central-1", "deploymentId": "<uuid>" },
   "addIn": {
     "name": "Scheduled Driver Unassign by Advantage One",
-    "securityId": { "id": "acP6yyGZ42EmhgOePJfLP7w", "name": "ViewSecurityId",
-                    "customPageName": "Scheduled Driver Unassign" },
-    "requireIsViewForReads": true,
-    "requireIsAddForWrites": true,
-    "requireAdminGroup": false
+    "pageName": "Scheduled Driver Unassign",
+    "securityId": { "id": "<this add-in's ViewSecurityId filter id — Step 0>", "name": "ViewSecurityId" },
+    "clearance": { "requireIsAdd": true, "allowEverythingGroup": true, "ignoreCatalogGroup": true }
   },
   "defaults": { "skipDriving": true, "graceMinutes": 60 },
   "customers": {
@@ -244,25 +288,28 @@ equivalent to Scheduler rights, and keep them scoped to the Scheduler execution 
 
 1. Resolve the deployment config from S3.
 2. Look up `session.database` in `customers`. Missing → **403 `DATABASE_NOT_ONBOARDED`** (do not fall through to "all customers").
-3. Build credentials `{ database: session.database, userName: session.userName, sessionId: session.sessionId }` and call
-   `Get User { search: { name: session.userName }, propertySelector: { fields: ["id","securityGroups"] } }`.
-   Geotab error → **401 `SESSION_INVALID`**. This call is the session proof; rebuild it from scratch if the legacy `checkAdmin` pattern is reused.
-4. Call `Get AddIn` (no search) with the same credentials and locate the entry for this add-in
-   (match on `config.addIn.name`, and/or the `securityId.id`). The response carries the caller's
-   feature/security entries shaped like:
-
-   ```json
-   { "isAdd": true,
-     "securityId": { "customPageName": "Geotab Order Addin", "isSystemSecurityId": true,
-                     "name": "ViewSecurityId", "id": "acP6yyGZ42EmhgOePJfLP7w" } }
-   ```
-
-   Require `isView === true` for reads and `isAdd === true` for mutations (create/update/delete/add run/unassign) when the corresponding `config.addIn.require*` flags are set. Not found, or the
-   entry shape differs from what Step 0 pinned → **403 `ADDIN_ACCESS_DENIED`** (fail closed).
-5. If `config.addIn.requireAdminGroup` is true, also require `GroupEverythingSecurityId` in the
-   user's `securityGroups`.
+3. Prove the session and get the caller's clearances: `Get User { search: { name: session.userName },
+   propertySelector: { fields: ["id", "securityGroups", "name"] } }` with
+   `credentials { database, userName, sessionId }` built from the forwarded session. Geotab error →
+   **401 `SESSION_INVALID`**.
+4. Resolve effective grants: for every group id in the returned `securityGroups`, read the group and
+   scan its `securityFilters`. Batch them through `ExecuteMultiCall` (one
+   `Get Group { search: { id: <groupId> } }` per group, ≤ 100 calls per multiCall), and select each
+   group by `id` from the returned array — never by index; `Get Group` returns many groups even when
+   searching one id (23 in the capture).
+5. Decide, using the flags in `config.addIn.clearance`:
+   - **Grant** when any filter matches this add-in — `securityId.id === config.addIn.securityId.id`
+     **or** `securityId.customPageName === config.addIn.pageName` — with `isAdd === true`
+     (`requireIsAdd`).
+   - **Grant** when `allowEverythingGroup` and any filter has
+     `securityId.id === "SecurityIdEverythingId"` with `isAdd === true` (the Administrator marker).
+   - **Ignore** the group whose `id === "GroupSecurityId"` when `ignoreCatalogGroup` — it lists all
+     294 filters as `isAdd: true` and carries no per-user signal.
+   - Otherwise → **403 `ADDIN_ACCESS_DENIED`**. An unreadable filter shape, an empty `securityGroups`,
+     or a Geotab error while reading groups is also a denial (fail closed), with a `reason` that
+     names what was missing.
 6. Only then execute the action, and only against the session's own database.
-7. Log the decision: `{ requestId, action, database, userName, outcome: "allowed"|"denied", reason }` — never the session id.
+7. Log the decision: `{ requestId, action, database, userName, outcome: "allowed"|"denied", reason, matchedSecurityId }` — never the session id or any credential material.
 
 ---
 
@@ -271,19 +318,28 @@ equivalent to Scheduler rights, and keep them scoped to the Scheduler execution 
 Each step states its deliverable, the acceptance test, and the evidence to keep. Do not start a step
 whose prerequisite step's acceptance test has not passed.
 
-### Step 0 — Pin the unknowns (blocking, no code)
+### Step 0 — Pin the remaining unknowns (blocking, no code)
 
-- Capture `api.getSession()` from a live add-in in a test database and record the exact fields (the
-  add-in only ever read `userName`, so the session shape is unverified). Add a temporary
-  `console.log(JSON.stringify(Object.keys(session)))` in a dev build if needed.
-- Capture **responses** (the HAR in `docs/` has none) for `Get User` and `Get AddIn` with a session
-  or service account, and record the exact path from that response to the `isView`/`isAdd` flag for
-  this add-in's security id. Save the redacted samples under `docs/captures/` (secrets and session
-  ids stripped).
-- Confirm: tenant count, largest fleet size, whether existing `AddInData` schedules must be
-  migrated, whether existing `svc-unassign` accounts are reused, and the AWS account id(s).
-- Confirm which browser origin the add-in actually calls from (`document.location.origin` inside
-  the add-in frame) so the Function URL CORS list is exact.
+**Resolved by `docs/exampleSecurityFilterCheck.txt`** (updated 2026-10-15): the clearance call, its
+response shape, the group/filter structure, the `isAdd` flag, the Administrator marker, and the list
+of add-in filter ids — all recorded in §2 and §6. Still open:
+
+- **This add-in's own filter id.** The capture is from a database where this add-in is not installed,
+  so `config.addIn.securityId.id` must be read from a database where it is (or from MyGeotab's
+  add-in management page): capture its `{ isAdd, securityId: { id, customPageName, name } }`.
+- **Two-user proof, in one database.** Run the §6 decision for an Administrator and for a restricted
+  user who lacks this add-in, and record both outcomes. Administrator must pass via
+  `SecurityIdEverythingId`; the restricted user must be denied. If both pass, a catalog group is
+  leaking into `securityGroups` — stop and re-derive the check before writing code.
+- **Session shape.** Capture `api.getSession()` from a live add-in (the add-in only ever read
+  `userName`; `sessionId` is unverified), then confirm the Lambda can call `Get User` with
+  `credentials { database, userName, sessionId }` and get a result instead of an auth error.
+- Confirm: tenant count, largest fleet size, whether existing `AddInData` schedules must be migrated,
+  whether the `svc-unassign` accounts are reused, and the AWS account id(s).
+- Confirm the browser origin the add-in calls from (`document.location.origin` inside the add-in
+  frame) so the Function URL CORS list is exact.
+- Keep redacted captures in `docs/captures/` (strip session ids, bearer tokens, customer and user
+  names). `docs/exampleSecurityFilterCheck.txt` stays git-ignored as it is.
 - **Acceptance:** every unknown above is answered in a written capture file; no code written yet.
 
 ### Step 1 — Repo layout and tooling
@@ -340,8 +396,9 @@ test/*.test.js                     # unit tests
 ### Step 4 — Authorization module (see §6)
 
 - **Acceptance:** table-driven tests for allowed/denied on: unknown database, invalid session,
-  add-in entry missing, `isView` false, `isAdd` false on a write, admin-group required, plus the
-  fail-closed case where the add-in entry shape is not the pinned shape.
+  no `securityGroups`, this add-in's filter absent, filter present with `isAdd: false`,
+  Administrator passing via `SecurityIdEverythingId`, the catalog group being ignored, a Geotab error
+  while reading groups, and a filter shape that does not match the captured one (fail closed).
 
 ### Step 5 — Schedule actions
 
@@ -509,10 +566,11 @@ OpenTofu, one root per region, same module, variables only:
 | D-C | Duplicate rule for identical one-time runs at the same instant for the same scope | Reject with 409 `DUPLICATE`; allow the same scope at different times, and different scopes at the same time |
 | D-D | Do existing `AddInData` schedules get migrated? | Yes, one-time migration in Step 11, with the old schedule disabled so it cannot double-fire |
 | D-E | Keep the client-side preview, or move it to `listAssignments`? | Keep it client-side (zero-latency, no extra API surface); expose `listAssignments` anyway for ops |
-| D-F | Should the Lambda still require Administrator group as well as the add-in security id? | No by default (`requireAdminGroup: false`); the add-in security filter is the gate, and Administrator is a fallback flag if a tenant's config demands it |
+| D-F | How does an Administrator pass the clearance check? | Via the `SecurityIdEverythingId` marker on their Everything group (`allowEverythingGroup: true`); every other clearance group must carry this add-in's filter with `isAdd: true` |
 | D-G | Where does the run history live? | Keep appending to the tenant's Geotab `AddInData` log (tenant-owned audit, zero UI change) |
 | D-H | Leave the add-in's own scheduler as a fallback? | No — remove it; two schedulers create double-run risk and EventBridge is authoritative |
 | D-I | One schedule group per Geotab database (500/region quota) or a single group with prefixed names? | Group per database while tenant count is low; revisit if it approaches 400 |
+| D-J | Exclude the 294-filter catalog group `GroupSecurityId` from grant computation? | Yes (`ignoreCatalogGroup: true`) — the capture shows every filter there as `isAdd: true`, so trusting it would authorize every user |
 
 ---
 
