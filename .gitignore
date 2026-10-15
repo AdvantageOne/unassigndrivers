@@ -1,0 +1,20 @@
+# Local infrastructure state / plans (never commit)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+*.auto.tfvars
+crash.log
+
+# Local secrets
+.env
+.env.*
+
+# Captured browser traces may contain live sessions, customer database names,
+# user identities and correlation IDs. Keep them out of a public repo.
+docs/exampleSecurityFilterCheck.txt
+*.har
+
+# OS noise
+.DS_Store
