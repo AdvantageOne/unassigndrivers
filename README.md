@@ -1,29 +1,87 @@
 # Scheduled Driver Unassign by Advantage One
 
-MyGeotab add-in that resets every asset to **Unknown Driver** at a time you set. Version 1.1.5.
+MyGeotab add-in that resets every asset to **Unknown Driver** at the times you set, so each
+shift starts clean and trips are not credited to the previous driver.
 
-The whole add-in is the single file `unassignDrivers.html`. MyGeotab loads it through jsDelivr, pinned to a release tag.
+The add-in is a single HTML file. Schedules are stored in AWS EventBridge Scheduler and
+executed by a Lambda, so they fire whether or not anyone has MyGeotab open. Results are
+written back to the tenant's own MyGeotab database as a run log.
 
-## Install in a MyGeotab database
+| | |
+|---|---|
+| Add-in | `unassignDrivers.html`, loaded by MyGeotab through jsDelivr, pinned to a release tag |
+| Scheduling | One Lambda + EventBridge Scheduler per region: Canada `ca-central-1`, United States `us-east-2` |
+| Tenant config | `s3://<deployment>-config/config/customers.json` |
+| Credentials | One AWS Secrets Manager secret per tenant (`unassign/<database>`) |
+| Deploy | `scripts/deploy.sh` (asks Canada or United States, then plans and applies) |
+| Support | jordan@advtracking.net |
+
+Docs: **[deployment guide](docs/aws-deployment-guide.md)** for operating it,
+**[maintainer's guide](docs/maintainers-guide.md)** for changing it,
+**[implementation brief](docs/aws-port-implementation-prompt.md)** for the design decisions,
+**[legacy analysis](docs/aws-lambda-eventbridge-port.md)** for how the GitHub Actions version worked.
+
+## Install the add-in in a MyGeotab database
 
 1. Open **System Settings → Add-Ins** and turn on **Allow unverified Add-Ins**.
-2. Click **New Add-In** and paste the contents of [`config.json`](config.json) into **Configuration**. If the add-in is already installed, edit the existing entry instead, because MyGeotab rejects a second add-in with the same name.
+2. Click **New Add-In** and paste the contents of [`config.json`](config.json) into **Configuration**.
+   If the add-in is already installed, edit the existing entry instead, because MyGeotab rejects a
+   second add-in with the same name.
 3. Click **Done**, then **Save**, and refresh the browser.
 
-## Release a new version
+The add-in reads and writes schedules through the Advantage One scheduling service; point it at a
+deployment by setting `SERVER_API_BASE` near the top of the add-in's `<script>` block (see the
+deployment guide). With that value empty, the add-in falls back to its original behaviour of
+running schedules in the browser while a tab is open.
 
-1. Replace `unassignDrivers.html` and `config.json` with the new build.
-2. Publish a release with a **new** tag that matches the version (for example `v1.1.6`). Never move or reuse a tag: jsDelivr caches each tag permanently.
-3. In each database, replace the add-in configuration with the new `config.json`.
+## Release a new version of the add-in
 
-## Run on schedule without MyGeotab open (GitHub Actions)
+1. Edit the sources, not the built file: schedule logic lives in `src/core/unassign-core.js`, the
+   service client in `src/addin/api-client.js`, and the UI in `unassignDrivers.html`.
+2. Run `npm test` (this includes a check that the built file matches `src/`) and `npm run build:addin`.
+3. Bump `version` in [`config.json`](config.json) and publish a release with a **new** tag that
+   matches (for example `v2.0.1`). Never move or reuse a tag: jsDelivr caches each tag permanently.
+4. In each database, replace the add-in configuration with the new `config.json`.
 
-`scheduled-unassign.js` and `.github/workflows/scheduled-unassign.yml` check every database listed in the `GEOTAB_ACCOUNTS` repository secret every 5 minutes. When a slot from the schedule saved on the add-in page is due, the runner unassigns the drivers and writes the run to the add-in's Run history, shown as *GitHub Actions*. It shares the add-in's lock, so an open add-in tab and the runner never both run the same slot.
+## Deploy or change the AWS side
 
-- `GEOTAB_ACCOUNTS` format: `[{"database":"jorn","userName":"svc@example.com","password":"...","server":"my.geotab.com"}]`. Add one entry per customer database.
-- Use a dedicated MyGeotab user per database with Administrator clearance and access to all assets.
-- Set the add-in's grace window to 60 minutes, because GitHub can start scheduled runs several minutes late.
-- Test with **Actions → Scheduled driver unassign → Run workflow → check**. This signs in and reports the schedule without changing anything.
-- A failed run (bad password, API error) shows red in Actions and GitHub emails the repo owner.
+```bash
+scripts/deploy.sh                 # asks: Canada (ca-central-1) or United States (us-east-2)
+scripts/onboard-customer.sh       # register a Geotab database with the scheduler
+scripts/offboard-customer.sh      # disable one, keeping its run history
+```
+
+Deployment requires only an AWS CLI login and OpenTofu 1.10+; the scripts own every other detail
+(bucket names, state, artifact, outputs). See the [deployment guide](docs/aws-deployment-guide.md).
+
+## Repository map
+
+```
+unassignDrivers.html            the add-in; built regions are generated (see below)
+config.json                     add-in configuration published to MyGeotab (jsDelivr tag)
+config.pages.json               legacy GitHub Pages config, unused
+src/core/unassign-core.js       schedule math, lock, unassign, run log (shared: add-in + Lambda)
+src/addin/api-client.js         browser client for the scheduling service
+src/lambda/                     the service: handler, actions, libraries
+build/inline-core.mjs           copies src/ into the add-in between BUILD markers
+test/                           unit tests (npm test); no network, no AWS, no tenant required
+infra/                          OpenTofu: module plus one thin root per region
+scripts/                        deploy, onboard, offboard
+docs/                           deployment guide, maintainer's guide, design brief, legacy analysis
+```
+
+**Built regions.** The two marked blocks in `unassignDrivers.html` (`BUILD:core`, `BUILD:client`)
+are generated from `src/` by `npm run build:addin`. Never edit inside those markers: edit the
+source and rebuild, or `npm test` will fail with a clear message.
+
+## Status
+
+- Implemented: shared core extraction with tests, the Lambda service (all add-in actions plus the
+  scheduled path), OpenTofu for both regions, deploy/onboard/offboard scripts, the add-in's
+  service mode, and these docs.
+- Pending, and requiring access this repository does not have: resolving this add-in's Geotab
+  `securityId.id` (the deployment ships with `""`, which denies everyone until it is set), proving
+  the clearance check against a real admin and a real restricted user, and the pilot/cutover.
+  Details in [docs/aws-deployment-guide.md](docs/aws-deployment-guide.md#2-before-the-first-real-run).
 
 Support: jordan@advtracking.net

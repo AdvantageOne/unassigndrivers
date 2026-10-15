@@ -126,6 +126,37 @@
         <div id="a1ud-updated" class="a1ud-muted a1ud-small"></div>
       </section>
 
+      <!-- Schedules managed by the AWS scheduling service (hidden unless SERVER_API_BASE is set) -->
+      <section class="a1ud-card a1ud-hidden" id="a1ud-schedules-card">
+        <div class="a1ud-card-head">
+          <span class="a1ud-icontile"><svg class="a1ud-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></span>
+          <div>
+            <span class="a1ud-eyebrow">Runs without this page open</span>
+            <h2>Scheduled runs</h2>
+          </div>
+        </div>
+        <p class="a1ud-muted">These run on Advantage One's scheduler, so they fire even when nobody has MyGeotab open. Saving above creates or updates a schedule; the table below shows everything currently scheduled for this database.</p>
+        <div class="a1ud-actions">
+          <button type="button" class="a1ud-btn a1ud-secondary" id="a1ud-schedules-refresh">Refresh</button>
+          <span id="a1ud-schedules-msg" class="a1ud-muted"></span>
+        </div>
+        <div class="a1ud-tablewrap">
+          <table class="a1ud-table" id="a1ud-schedules">
+            <thead><tr><th>When</th><th>Assets</th><th>Kind</th><th>Next run</th><th>State</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="a1ud-form">
+          <label class="a1ud-span2">Run once at <span class="a1ud-muted">(this database's time zone)</span>
+            <input type="datetime-local" id="a1ud-runat">
+          </label>
+          <div class="a1ud-actions">
+            <button type="button" class="a1ud-btn a1ud-secondary" id="a1ud-addrun">Add one-time run</button>
+            <span id="a1ud-editmsg" class="a1ud-muted"></span>
+          </div>
+        </div>
+      </section>
+
       <!-- Preview / manual -->
       <section class="a1ud-card">
         <div class="a1ud-card-head">
@@ -242,6 +273,7 @@
 })();
 </script>
 <script>
+/* BUILD:core:begin */
 /*
  * Scheduled Driver Unassign - core logic
  * AdvantageOne | MyGeotab Add-In
@@ -747,6 +779,7 @@
   else root.A1UnassignCore = api;
 })(typeof window !== "undefined" ? window : this);
 
+/* BUILD:core:end */
 </script>
 <script>
 /*
@@ -756,6 +789,158 @@
  * The function name (unassignDrivers) must match the HTML file name.
  */
 /* global geotab, A1UnassignCore */
+/* BUILD:client:begin */
+/*
+ * Scheduled Driver Unassign - add-in API client
+ * AdvantageOne
+ *
+ * Talks to the AWS deployment (Lambda Function URL) described in
+ * docs/aws-port-implementation-prompt.md sections 5.1 - 5.3.
+ *
+ * Inlined into unassignDrivers.html between the BUILD:client markers by
+ * build/inline-core.mjs, so edit this file and rebuild rather than editing the
+ * add-in. The same object is require()-able in Node for tests.
+ *
+ * The session is a bearer-equivalent credential: it is sent on every request
+ * and never stored, logged, or cached.
+ */
+(function (root) {
+  "use strict";
+
+  var DEFAULT_TIMEOUT_MS = 20000;
+
+  var ERROR_TEXT = {
+    BAD_REQUEST: "The request was rejected. Check the form and try again.",
+    SESSION_INVALID: "Your MyGeotab session is no longer valid. Refresh the page and sign in again.",
+    DATABASE_NOT_ONBOARDED: "This database is not set up for automatic runs yet. Contact Advantage One.",
+    ADDIN_ACCESS_DENIED: "Your MyGeotab role does not grant access to this add-in.",
+    CLEARANCE_REQUIRED: "Your MyGeotab role is missing a clearance this action needs.",
+    NOT_FOUND: "That schedule no longer exists. Refresh the list.",
+    DUPLICATE: "A schedule already exists for that group at that time.",
+    GEOTAB_ERROR: "MyGeotab rejected the request.",
+    INTERNAL: "The scheduling service hit an error. Try again in a moment."
+  };
+
+  function ApiError(code, message, status, requestId) {
+    var error = new Error(message || ERROR_TEXT[code] || "The request failed.");
+    error.name = "ApiError";
+    error.code = code || "INTERNAL";
+    error.status = status || 0;
+    error.requestId = requestId || null;
+    return error;
+  }
+
+  /** Message to show a person for a thrown error. */
+  function textFor(error) {
+    if (!error) return ERROR_TEXT.INTERNAL;
+    if (error.code && ERROR_TEXT[error.code]) return ERROR_TEXT[error.code];
+    return error.message || ERROR_TEXT.INTERNAL;
+  }
+
+  function normaliseBaseUrl(baseUrl) {
+    var value = String(baseUrl || "").trim();
+    if (!value) return "";
+    return value.replace(/\/+$/, "");
+  }
+
+  function createClient(options) {
+    options = options || {};
+    var baseUrl = normaliseBaseUrl(options.baseUrl);
+    var timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
+    var fetchImpl = options.fetchImpl || (root && root.fetch ? root.fetch.bind(root) : null);
+    var sessionProvider = options.session || options.getSession || null;
+
+    if (!baseUrl) throw new Error("A1UnassignApi: baseUrl is required");
+    if (!fetchImpl) throw new Error("A1UnassignApi: fetch is not available");
+
+    /** Accepts an object, a promise, or the MyGeotab callback style getSession(cb). */
+    function session() {
+      return new Promise(function (resolve, reject) {
+        var provided;
+        try {
+          provided = typeof sessionProvider === "function" ? sessionProvider() : sessionProvider;
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        if (provided && typeof provided.then === "function") {
+          provided.then(resolve, reject);
+          return;
+        }
+        if (provided) {
+          resolve(provided);
+          return;
+        }
+        reject(ApiError("SESSION_INVALID", "No MyGeotab session is available."));
+      });
+    }
+
+    function withTimeout() {
+      if (typeof AbortController === "undefined") return { signal: undefined, cancel: function () {} };
+      var controller = new AbortController();
+      var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+      return { signal: controller.signal, cancel: function () { clearTimeout(timer); } };
+    }
+
+    function parseBody(response) {
+      return response.text().then(function (text) {
+        if (!text) return {};
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          throw ApiError("INTERNAL", "The scheduling service returned an unreadable response.", response.status);
+        }
+      });
+    }
+
+    function request(action, payload) {
+      return session().then(function (current) {
+        var timeout = withTimeout();
+        return fetchImpl(baseUrl + "/", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: action, session: current, payload: payload || {} }),
+          signal: timeout.signal
+        }).then(function (response) {
+          timeout.cancel();
+          return parseBody(response).then(function (body) {
+            if (body && body.ok === false && body.error) {
+              throw ApiError(body.error.code, body.error.message, response.status, body.requestId);
+            }
+            if (!response.ok) {
+              throw ApiError("INTERNAL", "The scheduling service returned HTTP " + response.status + ".", response.status);
+            }
+            return body ? body.data : {};
+          });
+        }, function (error) {
+          timeout.cancel();
+          if (error && error.name === "AbortError") {
+            throw ApiError("INTERNAL", "The scheduling service did not respond in time.");
+          }
+          throw ApiError("INTERNAL", "Could not reach the scheduling service: " + (error && error.message ? error.message : error));
+        });
+      });
+    }
+
+    return {
+      baseUrl: baseUrl,
+      request: request,
+      listSchedules: function () { return request("listSchedules", {}); },
+      createSchedule: function (payload) { return request("createSchedule", payload); },
+      updateSchedule: function (payload) { return request("updateSchedule", payload); },
+      addRun: function (payload) { return request("addRun", payload); },
+      deleteSchedule: function (payload) { return request("deleteSchedule", payload); },
+      unassign: function (payload) { return request("unassign", payload || {}); },
+      listAssignments: function (payload) { return request("listAssignments", payload || {}); },
+      health: function () { return request("health", {}); }
+    };
+  }
+
+  var api = { create: createClient, ApiError: ApiError, textFor: textFor, ERROR_TEXT: ERROR_TEXT };
+  root.A1UnassignApi = api;
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+})(typeof window !== "undefined" ? window : this);
+/* BUILD:client:end */
 geotab.addin.unassignDrivers = function () {
   "use strict";
 
@@ -764,6 +949,14 @@ geotab.addin.unassignDrivers = function () {
   var RELOAD_EVERY_TICKS = 4;   // re-read the shared schedule every ~2 min
   var DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var EXTRA_ALLOWED_SECURITY_GROUP_IDS = []; // add custom clearance IDs here if needed
+
+  // Point this at the deployment's Lambda Function URL to schedule on AWS
+  // (see docs/aws-deployment-guide.md). Empty string keeps the original
+  // in-browser scheduler, which only runs while this page is open.
+  var SERVER_API_BASE = "";
+  var client = null;          // A1UnassignApi client, created on first use
+  var serverBound = false;    // controls in "Scheduled runs" are bound once
+  var editingName = null;     // name of the schedule the form is editing
 
   var api, me = null;
   var tabId = "tab-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -955,6 +1148,225 @@ geotab.addin.unassignDrivers = function () {
     }).join("") : '<tr><td colspan="5" class="a1ud-muted">No drivers are assigned in this scope. Your fleet is clean.</td></tr>';
   }
 
+  /* ---------------- AWS scheduling service (server mode) ----------------
+   * With SERVER_API_BASE set, schedules live in EventBridge and are executed by
+   * the Lambda, so they fire whether or not this page is open. The form writes
+   * to the service, "Scheduled runs" lists what exists for this database, and
+   * the in-tab scheduler stays off. Preview and Run history still read Geotab
+   * directly, which is also where every run is logged.
+   */
+  function serverMode() { return !!SERVER_API_BASE; }
+
+  function serverClient() {
+    if (!client) {
+      client = A1UnassignApi.create({
+        baseUrl: SERVER_API_BASE,
+        getSession: function () {
+          return new Promise(function (resolve, reject) {
+            api.getSession(function (session) {
+              if (session && session.userName) resolve(session);
+              else reject(new Error("MyGeotab did not return a session."));
+            });
+          });
+        }
+      });
+    }
+    return client;
+  }
+
+  function serverMessage(error) { return A1UnassignApi.textFor(error); }
+
+  function serverSchedulePayload() {
+    return {
+      mode: $("a1ud-mode").value,
+      time: $("a1ud-time").value,
+      timeZone: $("a1ud-tz").value,
+      days: Array.prototype.map.call($$("#a1ud-days input:checked"), function (i) { return +i.value; }),
+      scope: { groupIds: currentScopeIds() },
+      skipDriving: $("a1ud-skipdriving").checked
+    };
+  }
+
+  function hideLegacyScheduling() {
+    // The grace window, the wake lock and the "keep this page open" note
+    // describe the in-browser scheduler; they mean nothing once AWS runs it.
+    var grace = $("a1ud-grace");
+    if (grace && grace.parentNode) grace.parentNode.classList.add("a1ud-hidden");
+    var wake = $("a1ud-wakelock");
+    if (wake && wake.parentNode) wake.parentNode.classList.add("a1ud-hidden");
+    var panel = $("a1ud-tab-scheduler");
+    if (panel) Array.prototype.forEach.call(panel.querySelectorAll(".a1ud-warn"), function (el) { el.classList.add("a1ud-hidden"); });
+    show($("a1ud-schedules-card"), true);
+    $("a1ud-next").textContent = "Managed on AWS";
+    $("a1ud-countdown").textContent = "Runs on our scheduler, with or without this page open.";
+  }
+
+  function saveOnServer(msg) {
+    var payload;
+    try {
+      payload = serverSchedulePayload();
+      if (!$("a1ud-enabled").checked) throw new Error("Turn the schedule on to save it, or delete it from the list below.");
+      if (!/^\d{2}:\d{2}$/.test(payload.time)) throw new Error("Pick a time.");
+      if (payload.mode === "weekly" && !payload.days.length) throw new Error("Pick at least one day.");
+      if ($("a1ud-scope").value === "groups" && !payload.scope.groupIds.length) throw new Error("Pick at least one group, or choose All assets.");
+    } catch (e) {
+      msg.textContent = e.message;
+      return Promise.resolve();
+    }
+    $("a1ud-save").disabled = true;
+    msg.textContent = "Saving…";
+    var request = editingName
+      ? serverClient().updateSchedule(Object.assign({ name: editingName }, payload))
+      : serverClient().createSchedule(payload);
+    return request
+      .then(function (data) {
+        if (data && data.name) editingName = data.name;
+        msg.textContent = "Saved.";
+        return refreshSchedules();
+      })
+      .catch(function (e) { msg.textContent = serverMessage(e); })
+      .then(function () { $("a1ud-save").disabled = false; });
+  }
+
+  function runOnServer() {
+    $("a1ud-lastresult").textContent = "Running…";
+    return serverClient()
+      .unassign({ scope: { groupIds: currentScopeIds() }, skipDriving: $("a1ud-skipdriving").checked })
+      .then(function (data) {
+        var still = data.stillAssigned ? ", " + data.stillAssigned + " still assigned" : "";
+        $("a1ud-lastresult").textContent = "Last run (manual): " + data.unassigned + " unassigned, " + data.skipped +
+          " skipped, " + data.failed + " failed" + still + ".";
+        $("a1ud-lastresult").className = "a1ud-lastresult " + (data.failed || data.stillAssigned ? "is-bad" : "is-ok");
+      })
+      .catch(function (e) {
+        $("a1ud-lastresult").textContent = "Run failed: " + serverMessage(e);
+        $("a1ud-lastresult").className = "a1ud-lastresult is-bad";
+      })
+      .then(reload); // the run log is written to Geotab, so refresh Run history
+  }
+
+  function refreshSchedules() {
+    var msg = $("a1ud-schedules-msg");
+    if (msg) msg.textContent = "Loading…";
+    return serverClient()
+      .listSchedules()
+      .then(function (data) {
+        var list = (data && data.schedules) || [];
+        renderSchedules(list);
+        if (msg) msg.textContent = list.length + " schedule" + (list.length === 1 ? "" : "s");
+        return data;
+      })
+      .catch(function (e) {
+        if (msg) msg.textContent = serverMessage(e);
+        return { schedules: [] };
+      });
+  }
+
+  function scheduleWords(schedule) {
+    if (schedule.kind === "one-time") return "Once";
+    return schedule.mode === "weekly" ? "Weekly (" + (schedule.days || []).join(",") + ")" : "Every day";
+  }
+
+  function renderSchedules(list) {
+    var tb = $("a1ud-schedules").querySelector("tbody");
+    if (!list.length) {
+      tb.innerHTML = '<tr><td colspan="6" class="a1ud-muted">Nothing scheduled yet. Set a schedule above and save.</td></tr>';
+      return;
+    }
+    tb.innerHTML = list
+      .map(function (s) {
+        var assets = s.scope && s.scope.groupIds && s.scope.groupIds.length ? s.scope.groupIds.length + " group(s)" : "All assets";
+        return "<tr><td>" + esc(scheduleWords(s)) + " " + esc(s.time || "") + "</td><td>" + esc(assets) + "</td><td>" +
+          esc(s.kind) + "</td><td>" + esc(s.nextRun ? fmt(new Date(s.nextRun), s.timeZone) : "—") + "</td><td>" + esc(s.state) +
+          "</td><td>" +
+          '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-edit" data-name="' + esc(s.name) + '">Edit</button> ' +
+          '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-delete" data-name="' + esc(s.name) + '">Delete</button>' +
+          "</td></tr>";
+      })
+      .join("");
+  }
+
+  function loadScheduleIntoForm(name) {
+    return serverClient()
+      .listSchedules()
+      .then(function (data) {
+        var found = ((data && data.schedules) || []).filter(function (s) { return s.name === name; })[0];
+        if (!found) return;
+        editingName = name;
+        $("a1ud-mode").value = found.mode || "daily";
+        $("a1ud-time").value = found.time || "23:00";
+        if (found.timeZone) $("a1ud-tz").value = found.timeZone;
+        $("a1ud-skipdriving").checked = found.skipDriving !== false;
+        $("a1ud-scope").value = found.scope && found.scope.groupIds && found.scope.groupIds.length ? "groups" : "all";
+        checkedGroups = {};
+        ((found.scope && found.scope.groupIds) || []).forEach(function (id) { checkedGroups[id] = true; });
+        Array.prototype.forEach.call($$("#a1ud-days input"), function (i) {
+          i.checked = (found.days || []).indexOf(+i.value) !== -1;
+        });
+        syncModeVisibility();
+        renderGroups();
+        $("a1ud-editmsg").textContent = "Editing " + name + " — press Save Schedule to apply.";
+      })
+      .catch(function (e) { $("a1ud-editmsg").textContent = serverMessage(e); });
+  }
+
+  function deleteSchedule(name) {
+    $("a1ud-editmsg").textContent = "Deleting…";
+    return serverClient()
+      .deleteSchedule({ name: name })
+      .then(function () {
+        if (editingName === name) editingName = null;
+        $("a1ud-editmsg").textContent = "Deleted " + name + ".";
+        return refreshSchedules();
+      })
+      .catch(function (e) { $("a1ud-editmsg").textContent = serverMessage(e); });
+  }
+
+  function onAddRun() {
+    var value = $("a1ud-runat").value;
+    if (!value) {
+      $("a1ud-editmsg").textContent = "Pick a date and time for the one-time run.";
+      return Promise.resolve();
+    }
+    $("a1ud-editmsg").textContent = "Adding…";
+    return serverClient()
+      .addRun({
+        at: value,
+        timeZone: $("a1ud-tz").value,
+        scope: { groupIds: currentScopeIds() },
+        skipDriving: $("a1ud-skipdriving").checked
+      })
+      .then(function () {
+        $("a1ud-runat").value = "";
+        $("a1ud-editmsg").textContent = "One-time run added.";
+        return refreshSchedules();
+      })
+      .catch(function (e) { $("a1ud-editmsg").textContent = serverMessage(e); });
+  }
+
+  function bindServerControls() {
+    if (serverBound) return;
+    serverBound = true;
+    $("a1ud-schedules-refresh").addEventListener("click", function () { refreshSchedules(); });
+    $("a1ud-addrun").addEventListener("click", function () { onAddRun(); });
+    $("a1ud-schedules").addEventListener("click", function (event) {
+      var target = event.target;
+      if (!target || !target.getAttribute) return;
+      var name = target.getAttribute("data-name");
+      if (!name) return;
+      var classes = target.getAttribute("class") || "";
+      if (classes.indexOf("a1ud-sched-delete") !== -1) deleteSchedule(name);
+      else if (classes.indexOf("a1ud-sched-edit") !== -1) loadScheduleIntoForm(name);
+    });
+  }
+
+  function startServerMode() {
+    if (!serverMode()) return Promise.resolve();
+    hideLegacyScheduling();
+    bindServerControls();
+    return refreshSchedules();
+  }
+
   /* ---------------- actions ---------------- */
   function currentScopeIds() {
     return $("a1ud-scope").value === "groups" ? selectedGroupIds() : [];
@@ -962,6 +1374,7 @@ geotab.addin.unassignDrivers = function () {
 
   function onSave() {
     var msg = $("a1ud-savemsg");
+    if (serverMode()) return saveOnServer(msg);
     var s;
     try { s = readForm(); } catch (e) { msg.textContent = e.message; return; }
     $("a1ud-save").disabled = true;
@@ -996,6 +1409,9 @@ geotab.addin.unassignDrivers = function () {
 
   function onRunNowConfirm() {
     show($("a1ud-confirmwrap"), false);
+    if (serverMode()) {
+      return runOnServer().then(function () { $("a1ud-runnow").disabled = false; });
+    }
     doRun({ trigger: "manual", groupIds: currentScopeIds(), skipDriving: $("a1ud-skipdriving").checked })
       .then(function () { $("a1ud-runnow").disabled = false; });
   }
@@ -1027,6 +1443,8 @@ geotab.addin.unassignDrivers = function () {
 
   function tick(forceReload) {
     if (running || stopped) return Promise.resolve();
+    // In server mode AWS owns the schedule; this tab must never run one too.
+    if (serverMode()) return Promise.resolve();
     tickCount++;
     var s0 = sched();
     var localDue = s0 && core.evaluateDue(s0, new Date()).action !== "none";
@@ -1142,6 +1560,7 @@ geotab.addin.unassignDrivers = function () {
             fillForm();
             renderGroups();
             onPreview();
+            startServerMode();
             startTimers();
             tick(true);
           });
@@ -1159,7 +1578,7 @@ geotab.addin.unassignDrivers = function () {
         // fresh page element: restore what the user sees
         show($("a1ud-loading"), false);
         show($(me.isAdmin ? "a1ud-app" : "a1ud-denied"), true);
-        if (me.isAdmin) { fillForm(); renderGroups(); renderHistory(); renderStatus(); onPreview(); }
+        if (me.isAdmin) { fillForm(); renderGroups(); renderHistory(); renderStatus(); onPreview(); startServerMode(); }
       }
       if (me && me.isAdmin) { startTimers(); tick(true); syncWakeLock(); }
     },

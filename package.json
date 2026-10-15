@@ -1,0 +1,15 @@
+{
+  "name": "advone-scheduled-unassign",
+  "version": "2.0.0",
+  "private": true,
+  "description": "AWS Lambda + EventBridge Scheduler runner for the Scheduled Driver Unassign MyGeotab add-in",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build:addin": "node build/inline-core.mjs",
+    "check:addin": "node build/inline-core.mjs --check"
+  }
+}

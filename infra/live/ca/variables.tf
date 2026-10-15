@@ -1,0 +1,35 @@
+variable "allowed_origins" {
+  description = "Origins allowed to call the Lambda Function URL (the MyGeotab add-in frame origins)."
+  type        = list(string)
+  default     = ["https://my.geotab.com"]
+}
+
+variable "alarm_email" {
+  description = "Email address subscribed to the Canada alarm topic. Empty string creates no subscription."
+  type        = string
+  default     = ""
+}
+
+variable "log_retention_days" {
+  description = "CloudWatch Logs retention for the Lambda log group."
+  type        = number
+  default     = 30
+}
+
+variable "lambda_zip_path" {
+  description = "Lambda deployment artifact, relative to this root (path.root)."
+  type        = string
+  default     = "../../../dist/lambda.zip"
+}
+
+variable "lambda_handler" {
+  description = "Lambda handler entry point inside the deployment artifact."
+  type        = string
+  default     = "src/lambda/handler.handler"
+}
+
+variable "addin_security_id" {
+  description = "This add-in's Geotab ViewSecurityId filter id, seeded into config/customers.json (Step 0 of the port brief)."
+  type        = string
+  default     = ""
+}

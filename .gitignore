@@ -7,6 +7,9 @@ terraform.tfvars
 *.auto.tfvars
 crash.log
 
+# Lambda deployment artifact, built by scripts/deploy.sh (never commit)
+dist/
+
 # Local secrets
 .env
 .env.*

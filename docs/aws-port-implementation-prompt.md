@@ -1,9 +1,15 @@
 # Implementation brief — Scheduled Driver Unassign on AWS (CA + US)
 
-> **How to use this document:** paste it whole as the task brief for the implementation. It is
-> self-contained: a reader with no history with this repo should be able to execute it top to
-> bottom. Companion document for the legacy analysis: `docs/aws-lambda-eventbridge-port.md`
-> (this brief supersedes its §5 decisions and §6 architecture; its §3 invariants still apply).
+> **How to use this document:** it was executed on branch `aws-lambda-port`; treat it as the
+> design of record and read `docs/maintainers-guide.md` for what changed and where to edit now.
+> Companion document for the legacy analysis: `docs/aws-lambda-eventbridge-port.md` (this brief
+> supersedes its §5 decisions and §6 architecture; its §3 invariants still apply).
+>
+> **Status:** Step 0 partly done — the clearance call and its response are captured in §2, but this
+> add-in's own Geotab security id and the two-user proof are still outstanding, so the shipped
+> configuration denies every caller until the id is set. Steps 1–10 and 12 are implemented
+> (`src/`, `test/`, `infra/`, `scripts/`, the add-in's service mode, README + guides). Step 11 —
+> pilot, cutover, decommission — has not started and needs a live tenant and AWS account.
 
 ---
 
@@ -219,9 +225,14 @@ HTTP status: 200 ok · 400 `BAD_REQUEST` · 401 `SESSION_INVALID` · 403 `DATABA
   "group_ids": ["b1234"],
   "skip_driving": true,
   "schedule_name": "all-2300-4f2a9c1d",
-  "scheduled_time": "2026-10-16T03:00:00Z"
+  "scheduled_time": "2026-10-16T03:00:00Z",
+  "spec": { "mode": "daily", "time": "23:00", "timeZone": "America/New_York", "days": [], "onceAt": null }
 }
 ```
+
+`spec` is descriptive only: it lets `listSchedules` rebuild the plan (and the next run
+time) from EventBridge alone, so no second datastore is needed. The worker ignores it and
+uses the top-level fields.
 
 Routing rule: an event carrying `requestContext` (Function URL shape) is a browser request and
 **requires** a session; an event without it is a Scheduler payload and must carry

@@ -1,6 +1,7 @@
 # Port plan: scheduled driver unassign → AWS Lambda + Amazon EventBridge
 
-**Status:** plan only, nothing implemented. Investigated 2026-10-15 against `main` @ `3df2927`.
+**Status:** legacy analysis. Investigated 2026-10-15 against `main` @ `3df2927`; the port it
+describes has since been implemented on `aws-lambda-port` (see the repository README).
 **Branch:** `aws-lambda-port` (created; both planning docs live here).
 **Goal of this doc:** the legacy analysis — description, current state, review, invariants.
 
