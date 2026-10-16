@@ -455,6 +455,15 @@ addin_config_url() { # <config file> -> the page url it points at
   jq -r '.items[0].url // empty' "$1"
 }
 
+# addin_upload_note <previous etag> <current etag> -> "identical" | "changed" | ""
+# ("" means there was nothing there before). ETags come back quoted from the CLI
+# and unquoted from some paths, so the quotes are normalised away.
+addin_upload_note() {
+  local before="${1//\"/}" after="${2//\"/}"
+  case "$before" in ""|None|null) return 0 ;; esac
+  if [ "$before" = "$after" ]; then printf 'identical\n'; else printf 'changed\n'; fi
+}
+
 # ---------------------------------------------------------------------------
 # Pure JSON assembly (no AWS calls; exercised by --selftest)
 # ---------------------------------------------------------------------------

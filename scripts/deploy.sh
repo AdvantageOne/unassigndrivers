@@ -213,6 +213,12 @@ run_selftest() {
   done
   st_false "a missing configuration file is reported, not guessed" \
            addin_config_url "$PLAN_DIR/absent-config.json"
+  # What the upload says about the copy that was already there.
+  st_eq "a bucket with no page yet says nothing about the previous copy" "" "$(addin_upload_note "" "\"abc\"")"
+  st_eq "an unchanged page is reported as identical" "identical" "$(addin_upload_note "\"abc\"" "\"abc\"")"
+  st_eq "a changed page is reported as changed" "changed" "$(addin_upload_note "\"abc\"" "\"def\"")"
+  st_eq "unquoted etags compare the same way" "identical" "$(addin_upload_note "abc" "\"abc\"")"
+  st_eq "a missing previous etag (None from the CLI) says nothing" "" "$(addin_upload_note "None" "\"abc\"")"
   st_eq "region arg 'ca' maps to code" "ca" "$(region_code_from_arg ca)"
   st_eq "region arg 'us' maps to code" "us" "$(region_code_from_arg us)"
   st_eq "region arg 'ca-central-1' maps to code" "ca" "$(region_code_from_arg ca-central-1)"
@@ -902,7 +908,7 @@ configure_addin_bucket() { # <bucket>
 # publish_addin <bucket> <function-url>: uploads the page and proves it is
 # readable from where MyGeotab reads it.
 publish_addin() {
-  local bucket="$1" key page public rc=0 body status content_type url
+  local bucket="$1" key page public rc=0 body status content_type url before before_display landed landed_size landed_etag landed_version
   url="$(strip_trailing_slashes "${2:-}")"
   key="$(addin_object_key)"
   public="$(addin_object_url "$bucket" "$AWS_REGION" "$key")"
@@ -926,7 +932,13 @@ publish_addin() {
     esac
   fi
 
-  info "publishing the add-in page for $url"
+  # What is already published, so the run can say whether this upload changed it
+  # (a no-change deploy still uploads — that is how a page-only fix ships).
+  before="$(aws_try s3api head-object --bucket "$bucket" --key "$key" --query 'ETag' \
+            --output text --region "$AWS_REGION" 2>/dev/null || true)"
+
+  info "uploading $REPO_ROOT/unassignDrivers.html to s3://$bucket/$key"
+  info "  with SERVER_API_BASE = $url"
   must_aws "upload the add-in page to s3://$bucket/$key" \
            "grant s3:PutObject on $bucket/unassign/*, then re-run $SCRIPT_NAME --region $REGION_CODE" \
            s3 cp "$page" "s3://$bucket/$key" \
@@ -936,21 +948,41 @@ publish_addin() {
            --region "$AWS_REGION" --only-show-errors
   rm -f "$page"
 
+  # Read the object back, so the run states what was stored rather than that the
+  # command was issued.
+  landed="$(aws_try s3api head-object --bucket "$bucket" --key "$key" \
+            --query '[ContentLength, ETag, VersionId]' --output json --region "$AWS_REGION" 2>/dev/null || true)"
+  landed_size="$(printf '%s' "$landed" | jq -r '.[0] // empty' 2>/dev/null || true)"
+  landed_etag="$(printf '%s' "$landed" | jq -r '.[1] // empty' 2>/dev/null || true)"
+  landed_version="$(printf '%s' "$landed" | jq -r '.[2] // empty' 2>/dev/null || true)"
+  if [ -z "$landed_size" ]; then
+    warn "the upload reported success, but s3://$bucket/$key cannot be read back"
+    hint "check by hand: aws s3api head-object --bucket $bucket --key $key --region $AWS_REGION"
+  else
+    ok "uploaded the $REGION_CODE add-in page: s3://$bucket/$key ($landed_size bytes${landed_version:+, version $landed_version})"
+    before_display="${before//\"/}"
+    case "$(addin_upload_note "$before" "$landed_etag")" in
+      identical) info "the page is identical to the copy the bucket already had" ;;
+      changed)   ok "the page changed: it replaces the copy with ETag $before_display" ;;
+      *)         ok "this is the first add-in page in s3://$bucket" ;;
+    esac
+  fi
+
   if ! command -v curl >/dev/null 2>&1; then
     info "smoke test: skipping the add-in page fetch (curl is not installed)"
-    ok "add-in page: $public"
+    info "its public URL: $public"
     return 0
   fi
   body="$(curl -sS -m 15 -w '\n%{http_code}|%{content_type}' "$public" 2>/dev/null || true)"
   status="$(printf '%s' "$body" | tail -1 | cut -d'|' -f1)"
   content_type="$(printf '%s' "$body" | tail -1 | cut -d'|' -f2)"
   if [ "$status" != "200" ]; then
-    warn "the add-in page is not readable at $public (HTTP ${status:-none})"
+    warn "the uploaded page is not readable at $public (HTTP ${status:-none})"
     hint "public read comes from the bucket policy on /unassign/* — check: aws s3api get-bucket-policy --bucket $bucket --region $AWS_REGION"
     return 0
   fi
   if printf '%s' "$body" | grep -qF "$url"; then
-    ok "add-in page live: $public (HTTP 200, $content_type, names $url)"
+    ok "the uploaded page is live: $public (HTTP 200, $content_type, names $url)"
   else
     warn "the published page does not name $url"
     hint "it may be a cached copy: re-run $SCRIPT_NAME --region $REGION_CODE, then check with curl -s $public | grep SERVER_API_BASE"
@@ -1084,7 +1116,7 @@ smoke_test_cors "$FN_NAME" "$(output_value function_url "$OUTS")"
 
 ADDIN_BUCKET="$(addin_bucket_for)"
 ADDIN_URL="$(addin_object_url "$ADDIN_BUCKET" "$AWS_REGION" "$(addin_object_key)")"
-step "Add-in page"
+step "Add-in page (s3://$ADDIN_BUCKET/$(addin_object_key))"
 publish_addin "$ADDIN_BUCKET" "$(output_value function_url "$OUTS")"
 
 step "Next steps"
