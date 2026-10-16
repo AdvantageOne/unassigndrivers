@@ -152,6 +152,17 @@ test("textFor prefers the documented copy and falls back to the message", () => 
   assert.equal(api.ERROR_TEXT.LICENSE_REQUIRED, "Please contact your CSR to enable your license");
 });
 
+test("a rejected form shows the service's own reason, not the generic copy", () => {
+  // The service's BAD_REQUEST messages name the field or the reason; showing
+  // "check the form and try again" instead hid why a save was refused.
+  const reason = "MyGeotab rejected those credentials for advone_matt_dev1: InvalidUserException: Incorrect login credentials.";
+  assert.equal(api.textFor({ code: "BAD_REQUEST", message: reason }), reason);
+  assert.equal(api.textFor({ code: "BAD_REQUEST" }), api.ERROR_TEXT.BAD_REQUEST, "canned text when there is none");
+  // Codes whose message is not for the operator keep their friendly text.
+  assert.equal(api.textFor({ code: "INTERNAL", message: "options.load is not a function" }), api.ERROR_TEXT.INTERNAL);
+  assert.equal(api.textFor({ code: "SESSION_INVALID", message: "InvalidUserException" }), api.ERROR_TEXT.SESSION_INVALID);
+});
+
 test("every code the service can return has friendly text", () => {
   for (const code of [
     "BAD_REQUEST",

@@ -876,9 +876,17 @@
     return error;
   }
 
+  // Codes whose message is written for whoever is filling the form: the service
+  // names the reason ("MyGeotab rejected those credentials for advone_matt_dev1:
+  // InvalidUserException: Incorrect login credentials"), and that beats generic
+  // copy. Everything else keeps the canned sentence — an INTERNAL detail is not
+  // something to put in front of an operator.
+  var PREFER_SERVER_MESSAGE = { BAD_REQUEST: true };
+
   /** Message to show a person for a thrown error. */
   function textFor(error) {
     if (!error) return ERROR_TEXT.INTERNAL;
+    if (error.code && PREFER_SERVER_MESSAGE[error.code] && error.message) return error.message;
     if (error.code && ERROR_TEXT[error.code]) return ERROR_TEXT[error.code];
     return error.message || ERROR_TEXT.INTERNAL;
   }

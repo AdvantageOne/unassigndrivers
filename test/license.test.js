@@ -264,7 +264,13 @@ test("a rejected credential writes nothing at all", async () => {
 
   await assert.rejects(
     () => license.saveWorkerCredentials(ctx, { workerUserName: "svc@customer.com", workerPassword: "wrong" }),
-    (error) => error.code === "BAD_REQUEST" && /rejected those credentials/.test(error.message)
+    (error) =>
+      error.code === "BAD_REQUEST" &&
+      // The operator needs to know *which* database refused, what MyGeotab said,
+      // and what to check — this message is what the add-in now shows.
+      error.message.includes(`rejected those credentials for ${ctx.session.database}`) &&
+      /wrong password/.test(error.message) &&
+      /user name and password/.test(error.message)
   );
   assert.equal(ctx.secrets.length, 0, "no secret when the account cannot sign in");
   assert.equal(ctx.writes.length, 0, "no config record either");

@@ -103,7 +103,12 @@ async function saveWorkerCredentials(context, payload) {
   try {
     await geotab.authenticate({ database, userName: workerUserName, password: workerPassword });
   } catch (error) {
-    throw appError("BAD_REQUEST", `MyGeotab rejected those credentials: ${error.message}`);
+    throw appError(
+      "BAD_REQUEST",
+      `MyGeotab rejected those credentials for ${database}: ${error.message}. ` +
+        "Check the service account's user name and password, and that it can sign in to MyGeotab " +
+        "(not locked, not expired, and not a Driver-only user)."
+    );
   }
 
   const secretName = naming.secretName(database);
