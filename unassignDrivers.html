@@ -1002,7 +1002,7 @@ geotab.addin.unassignDrivers = function () {
   // yet, so this is one endpoint for now.
   var SERVER_API_BASE = "https://yfzpzulqadv5r7rkbtbenmphiy0xrdnl.lambda-url.ca-central-1.on.aws";
   var client = null;          // A1UnassignApi client, created on first use
-  var serverBound = false;    // controls in "Scheduled runs" are bound once
+  var serverBoundRoot = null; // the page element the service controls are bound to
   var editingName = null;     // name of the schedule the form is editing
 
   var api, me = null;
@@ -1233,8 +1233,14 @@ geotab.addin.unassignDrivers = function () {
    * page asks first: Advantage One staff can finish the setup here, everyone
    * else is told to contact their CSR (the overlay covers the page).
    */
+  /**
+   * Only a licence refusal earns the overlay. DATABASE_NOT_ONBOARDED means the
+   * database has no service account yet — the state the setup panel exists to
+   * fix for staff — so treating it as a licence problem used to hide that very
+   * panel behind "contact your CSR".
+   */
   function licenseRefused(error) {
-    return !!error && (error.code === "LICENSE_REQUIRED" || error.code === "DATABASE_NOT_ONBOARDED");
+    return !!error && error.code === "LICENSE_REQUIRED";
   }
 
   function showLicenseModal() {
@@ -1266,22 +1272,32 @@ geotab.addin.unassignDrivers = function () {
       : "No service account is configured yet.";
   }
 
-  /** What a licence response means for this page. */
+  /**
+   * What a licence response means for this page. Returns the decision so the
+   * caller can decide whether asking the service for schedules makes sense:
+   * "setup" (staff, nothing registered yet), "ready", "unlicensed", or null when
+   * there is nothing to act on (legacy mode, or the check could not be made).
+   */
   function applyLicense(data) {
-    if (!data) return; // legacy mode, or the check failed: leave the page as it is
+    if (!data) return null;
     if (data.staff && data.setupAllowed) {
       // Staff may connect the service account; the app itself stays usable.
       // The response carries no server field, so the form keeps its default.
       hideLicenseModal();
       show($("a1ud-setup-card"), true);
-    } else if (data.licensed) {
+      renderWorkerState(data);
+      return data.onboarded ? "ready" : "setup";
+    }
+    if (data.licensed) {
       hideLicenseModal();
       show($("a1ud-setup-card"), false);
-    } else {
-      show($("a1ud-setup-card"), false);
-      showLicenseModal();
+      renderWorkerState(data);
+      return "ready";
     }
+    show($("a1ud-setup-card"), false);
     renderWorkerState(data);
+    showLicenseModal();
+    return "unlicensed";
   }
 
   function onSaveWorker() {
@@ -1489,8 +1505,11 @@ geotab.addin.unassignDrivers = function () {
   }
 
   function bindServerControls() {
-    if (serverBound || !serverMode()) return;
-    serverBound = true;
+    // MyGeotab rebuilds the add-in's page element when the user navigates, and
+    // listeners live on the elements they were attached to: rebinding only when
+    // the root changes keeps Save working after a rebuild.
+    if (!serverMode() || serverBoundRoot === root) return;
+    serverBoundRoot = root;
     $("a1ud-schedules-refresh").addEventListener("click", function () { refreshSchedules(); });
     $("a1ud-addrun").addEventListener("click", function () { onAddRun(); });
     $("a1ud-worker-save").addEventListener("click", function () { onSaveWorker(); });
@@ -1505,11 +1524,24 @@ geotab.addin.unassignDrivers = function () {
     });
   }
 
+  /**
+   * The single place that asks about licensing and acts on the answer. A
+   * database with no service account has no schedules to list, and asking would
+   * only earn a refusal — so the licence answer decides that too.
+   */
   function startServerMode() {
-    if (!serverMode()) return Promise.resolve();
+    if (!serverMode()) return Promise.resolve(null);
     hideLegacyScheduling();
     bindServerControls();
-    return refreshSchedules();
+    return checkLicense().then(function (data) {
+      var state = applyLicense(data);
+      if (state === "unlicensed") return null; // the overlay explains it
+      if (state === "setup") {
+        $("a1ud-schedules-msg").textContent = "No schedules yet — save a service account above to register this database.";
+        return null;
+      }
+      return refreshSchedules();
+    });
   }
 
   /* ---------------- actions ---------------- */
@@ -1695,20 +1727,16 @@ geotab.addin.unassignDrivers = function () {
           show($("a1ud-loading"), false);
           if (!who.isAdmin) { show($("a1ud-denied"), true); return; }
           show($("a1ud-app"), true);
-          // Bind the service controls before the licence check can reveal the
-          // setup card they live on (a no-op outside service mode).
-          bindServerControls();
-          return checkLicense()
-            .then(function (license) {
-              applyLicense(license);
-              return Promise.all([
-                reload(),
-                call("Get", { typeName: "Group" }).then(function (gs) {
-                  groups = (gs || []).map(function (g) { return { id: g.id, label: g.name || g.id }; })
-                    .sort(function (a, b) { return a.label.localeCompare(b.label); });
-                }).catch(function () { groups = []; })
-              ]);
-            })
+          // startServerMode() below owns the licence check: it binds the service
+          // controls, applies the licence decision and then decides whether the
+          // schedules list is worth asking for.
+          return Promise.all([
+            reload(),
+            call("Get", { typeName: "Group" }).then(function (gs) {
+              groups = (gs || []).map(function (g) { return { id: g.id, label: g.name || g.id }; })
+                .sort(function (a, b) { return a.label.localeCompare(b.label); });
+            }).catch(function () { groups = []; })
+          ])
             .then(function () {
               fillForm();
               renderGroups();
@@ -1731,12 +1759,11 @@ geotab.addin.unassignDrivers = function () {
         // fresh page element: restore what the user sees
         show($("a1ud-loading"), false);
         show($(me.isAdmin ? "a1ud-app" : "a1ud-denied"), true);
+        // The rebuilt element comes back with the setup card and the overlay
+        // hidden; startServerMode() re-applies the licence decision and rebinds
+        // the controls it lives on (a no-op outside service mode).
         if (me.isAdmin) {
           fillForm(); renderGroups(); renderHistory(); renderStatus(); onPreview(); startServerMode();
-          // The rebuilt element comes back with the setup card and the overlay
-          // hidden, so the same licence decision is applied again (a no-op
-          // outside service mode).
-          checkLicense().then(applyLicense);
         }
       }
       if (me && me.isAdmin) { startTimers(); tick(true); syncWakeLock(); }
