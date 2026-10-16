@@ -89,7 +89,9 @@ never written to a file or a log.
 
 What it creates (all names carry one batch id):
   <N> drivers   Add User   { isDriver: true, name: A1SEED-<stamp>-Driver-NN }
-  <N> assets    Add Device { name: A1SEED-<stamp>-Asset-NN, serialNumber: … }
+  <N> assets    Add Device { name: A1SEED-<stamp>-Asset-NN, groups: [Company] }
+                (no serial number: MyGeotab validates those, and a test asset
+                does not need one)
   <N> assignments  Add DriverChange { device, driver, dateTime, type: "Driver" }
 
 Then it reads the assignments back the way the service does (a DriverChange
@@ -140,46 +142,27 @@ seed_name() { # <batch> <Kind> <index> -> A1SEED-…-Driver-03
   printf '%s-%s-%02d\n' "$batch" "$kind" "$((10#$index))"
 }
 
-seed_serial() { # <batch> <index> -> A1SEED-…-SN-03 (asset serial numbers are free-form)
-  local batch="${1:-}" index="${2:-0}"
-  printf '%s-SN-%02d\n' "$batch" "$((10#$index))"
-}
-
 # How many non-empty lines a captured list has (grep -c exits 1 on no match).
 seed_count() { # <text>
   printf '%s\n' "${1:-}" | grep -c . || true
 }
 
 # A driver needs a password ("-32000: Value cannot be null. (Parameter
-# 'Password')"), and it has to satisfy the database's password policy, which may
-# require a symbol — a 32-character alphanumeric would fail that by design, not
-# by bad luck. One random password per driver, never printed and never logged:
-# nobody signs in as these records, and an admin can reset one if that changes.
-PASSWORD_ALPHABET='A-Za-z0-9!@#%^*_+=?-'
+# 'Password')") that satisfies the database's policy, which may require a symbol.
+# Built to satisfy any such policy by construction — 29 random alphanumerics from
+# the repo's own generator plus one of each class — rather than drawing from a
+# mixed alphabet and hoping: with a mixed alphabet a symbol lands about 2% of the
+# time, which failed one run in sixteen.
+# One password per driver, never printed and never logged: nobody signs in as
+# these records, and an admin can reset one if that ever changes.
 seed_password() {
-  local attempt=0 raw
-  while [ "$attempt" -lt 5 ]; do
-    attempt=$((attempt + 1))
-    raw=""
-    if command -v openssl >/dev/null 2>&1; then
-      raw="$(LC_ALL=C openssl rand -base64 96 2>/dev/null | LC_ALL=C tr -dc "$PASSWORD_ALPHABET" || true)"
-    fi
-    if [ "${#raw}" -lt 32 ] && command -v node >/dev/null 2>&1; then
-      raw="$(node -e '
-        const c = require("crypto").randomBytes(96).toString("base64").replace(/[^A-Za-z0-9!@#%^*_+=?-]/g, "");
-        process.stdout.write(c);
-      ' 2>/dev/null || true)"
-    fi
-    [ "${#raw}" -ge 32 ] || continue
-    raw="${raw:0:32}"
-    # One of each class, checked rather than hoped for.
-    if printf '%s' "$raw" | grep -q '[A-Z]' && printf '%s' "$raw" | grep -q '[a-z]' \
-       && printf '%s' "$raw" | grep -q '[0-9]' && printf '%s' "$raw" | grep -q '[^A-Za-z0-9]'; then
-      printf '%s\n' "$raw"
-      return 0
-    fi
-  done
-  return 1
+  local base symbols symbol
+  base="$(generate_password)" || return 1 # 32 alphanumerics, openssl or node
+  [ "${#base}" -ge 32 ] || return 1
+  # Which symbol is not the secret here: the strength is in `base`.
+  symbols='!@#%^*_+=?-'
+  symbol="${symbols:$((RANDOM % ${#symbols})):1}"
+  printf '%s%saA1\n' "${base:0:29}" "$symbol"
 }
 
 # Does the database actually have this group? Never send an id that was guessed:
@@ -247,10 +230,12 @@ seed_user_json() { # <name> <index> <company group id> <security group id> <pass
       companyGroups: [{id: $company}], securityGroups: [{id: $security}], password: $password}'
 }
 
-# The same for an asset: Device.groups, or MyGeotab has nowhere to file it.
-seed_device_json() { # <name> <serial> <group id>
-  jq -n --arg name "${1:-}" --arg serial "${2:-}" --arg group "${3:-}" \
-    '{name: $name, serialNumber: $serial, groups: [{id: $group}]}'
+# The same for an asset: Device.groups, or MyGeotab has nowhere to file it. No
+# serialNumber: MyGeotab validates serial numbers and refused the one this used
+# to invent, and a test asset does not need one.
+seed_device_json() { # <name> <group id>
+  jq -n --arg name "${1:-}" --arg group "${2:-}" \
+    '{name: $name, groups: [{id: $group}]}'
 }
 
 # The assignment itself — the same entity the service writes to clear a fleet,
@@ -496,7 +481,7 @@ add_devices() { # -> ids on stdout, one per line
   local i name id
   for ((i = 1; i <= COUNT; i++)); do
     name="$(seed_name "$BATCH" Asset "$i")"
-    id="$(add_one "Device" "$(seed_device_json "$name" "$(seed_serial "$BATCH" "$i")" "$COMPANY_GROUP_ID")" "asset $name")" || return 1
+    id="$(add_one "Device" "$(seed_device_json "$name" "$COMPANY_GROUP_ID")" "asset $name")" || return 1
     printf '%s\n' "$id"
   done
 }
@@ -573,7 +558,7 @@ cleanup_batch() { # removes everything named A1SEED-…
   user_ids="$(printf '%s' "$users" | jq -r --arg p "$SEED_PREFIX_BASE" '.[] | select((.name // "") | startswith($p)) | .id')"
   device_ids="$(printf '%s' "$devices" | jq -r --arg p "$SEED_PREFIX_BASE" '.[] | select((.name // "") | startswith($p)) | .id')"
   printf '%s\n' "$users" | jq -r --arg p "$SEED_PREFIX_BASE" '.[] | select((.name // "") | startswith($p)) | "  driver: \(.name)"' >&2
-  printf '%s\n' "$devices" | jq -r --arg p "$SEED_PREFIX_BASE" '.[] | select((.name // "") | startswith($p)) | "  asset : \(.name) (\(.serialNumber // "no serial"))"' >&2
+  printf '%s\n' "$devices" | jq -r --arg p "$SEED_PREFIX_BASE" '.[] | select((.name // "") | startswith($p)) | "  asset : \(.name)"' >&2
   if [ -z "$user_ids" ] && [ -z "$device_ids" ]; then
     ok "nothing to remove: no record in $DATABASE is named $SEED_PREFIX_BASE-…"
     return 0
@@ -615,7 +600,7 @@ run_selftest() {
   st_eq "batch id drops the offset formatting" "A1SEED-20261016T133045Z" "$(seed_batch_id "2026-10-16T13:30:45Z")"
   st_eq "driver name is zero padded" "A1SEED-x-Driver-03" "$(seed_name "A1SEED-x" "Driver" 3)"
   st_eq "asset name is zero padded" "A1SEED-x-Asset-10" "$(seed_name "A1SEED-x" "Asset" 10)"
-  st_eq "serial number" "A1SEED-x-SN-07" "$(seed_serial "A1SEED-x" 7)"
+
   st_eq "counting a captured list" "3" "$(seed_count "$(printf 'a\nb\nc\n')")"
   st_eq "counting nothing is zero, not an error" "0" "$(seed_count "")"
 
@@ -659,15 +644,25 @@ run_selftest() {
   # MyGeotab refuses a driver with no password, and the password has to satisfy
   # the database's policy — which may demand a symbol, so the alphabet includes
   # them rather than relying on 32 alphanumerics passing.
-  local pw1 pw2
+  local pw1 pw2 sample missing=0 i
   pw1="$(seed_password)"
   pw2="$(seed_password)"
-  st_eq "a generated password is 32 characters" "32" "${#pw1}"
+  st_eq "a generated password is 33 characters" "33" "${#pw1}"
   st_true "it has an uppercase letter" bash -c "printf '%s' '$pw1' | grep -q '[A-Z]'"
   st_true "it has a lowercase letter" bash -c "printf '%s' '$pw1' | grep -q '[a-z]'"
   st_true "it has a digit" bash -c "printf '%s' '$pw1' | grep -q '[0-9]'"
   st_true "it has a symbol, so a strict policy still passes" bash -c "printf '%s' '$pw1' | grep -q '[^A-Za-z0-9]'"
   st_false "two drivers do not share a password" test "$pw1" = "$pw2"
+  # The guarantee, over many draws — drawing from a mixed alphabet looked fine on
+  # one sample and produced a symbol-free password once in sixteen.
+  for ((i = 0; i < 20; i++)); do
+    sample="$(seed_password)"
+    case "$sample" in
+      *[A-Z]* ) case "$sample" in *[a-z]*) case "$sample" in *[0-9]*) case "$sample" in *[!A-Za-z0-9]*) ;; *) missing=$((missing + 1)) ;; esac ;; *) missing=$((missing + 1)) ;; esac ;; *) missing=$((missing + 1)) ;; esac ;;
+      *) missing=$((missing + 1)) ;;
+    esac
+  done
+  st_eq "twenty consecutive passwords all satisfy every class" "0" "$missing"
 
   local user device change search
   user="$(seed_user_json "A1SEED-x-Driver-01" 1 "GroupCompanyId" "GroupDriverSecurityId" "s3cret-Passw0rd!")"
@@ -682,10 +677,11 @@ run_selftest() {
         "$(printf '%s' "$user" | jq -r '.companyGroups[0].id')"
   st_eq "the driver has a clearance" "GroupDriverSecurityId" \
         "$(printf '%s' "$user" | jq -r '.securityGroups[0].id')"
-  device="$(seed_device_json "A1SEED-x-Asset-01" "A1SEED-x-SN-01" "GroupCompanyId")"
+  device="$(seed_device_json "A1SEED-x-Asset-01" "GroupCompanyId")"
   st_eq "device name" "A1SEED-x-Asset-01" "$(printf '%s' "$device" | jq -r .name)"
-  st_eq "device serial number" "A1SEED-x-SN-01" "$(printf '%s' "$device" | jq -r .serialNumber)"
   st_eq "the asset belongs to the company group" "GroupCompanyId" "$(printf '%s' "$device" | jq -r '.groups[0].id')"
+  # MyGeotab validates serial numbers and refused the invented one, so none is sent.
+  st_eq "the asset carries no serial number" "groups name" "$(printf '%s' "$device" | jq -r 'keys | join(" ")')"
   change="$(seed_driverchange_json "b1" "b2" "2026-10-16T13:30:00.000Z")"
   st_eq "an assignment is a DriverChange for the device" "b1" "$(printf '%s' "$change" | jq -r .device.id)"
   st_eq "an assignment names the driver" "b2" "$(printf '%s' "$change" | jq -r .driver.id)"
