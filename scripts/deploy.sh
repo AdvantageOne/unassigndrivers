@@ -203,10 +203,16 @@ run_selftest() {
   printf '%s\n' '<html><script>' '  var SOMETHING_ELSE = 1;' '</script></html>' > "$addin_noendpoint"
   st_false "a page without a SERVER_API_BASE line is refused" render_addin_html "$addin_noendpoint" "$addin_ca"
   st_false "a missing add-in file is refused" render_addin_html "$PLAN_DIR/absent.html" "$addin_ca"
-  st_eq "the printed add-in configuration points at the published page" "https://example.test/unassign/unassignDrivers.html" \
-        "$(addin_config_json "$REPO_ROOT/config.json" "https://example.test/unassign/unassignDrivers.html" | jq -r '.items[0].url')"
-  st_eq "the printed add-in configuration keeps the name and version" "$(jq -r '.name' "$REPO_ROOT/config.json")" \
-        "$(addin_config_json "$REPO_ROOT/config.json" "https://example.test/x.html" | jq -r '.name')"
+  # One committed configuration per region, naming that region's published page.
+  st_eq "config path for ca" "$REPO_ROOT/config.ca.json" "$(addin_config_path "$REPO_ROOT" ca)"
+  st_eq "config path for us" "$REPO_ROOT/config.us.json" "$(addin_config_path "$REPO_ROOT" us)"
+  for code in ca us; do
+    st_eq "config.$code.json names the page this script publishes" \
+          "$(addin_object_url "$(region_field "$code" addin)" "$(region_field "$code" region)" "$(addin_object_key)")" \
+          "$(addin_config_url "$(addin_config_path "$REPO_ROOT" "$code")" || true)"
+  done
+  st_false "a missing configuration file is reported, not guessed" \
+           addin_config_url "$PLAN_DIR/absent-config.json"
   st_eq "region arg 'ca' maps to code" "ca" "$(region_code_from_arg ca)"
   st_eq "region arg 'us' maps to code" "us" "$(region_code_from_arg us)"
   st_eq "region arg 'ca-central-1' maps to code" "ca" "$(region_code_from_arg ca-central-1)"
@@ -951,6 +957,26 @@ publish_addin() {
   fi
 }
 
+# print_addin_config <public url>: the region's committed configuration, checked
+# against what this run published. Printing the file rather than rewriting a URL
+# into a shared one means the config an operator pastes is reviewable in git.
+print_addin_config() {
+  local public="$1" file configured
+  file="$(addin_config_path "$REPO_ROOT" "$REGION_CODE")"
+  if [ ! -f "$file" ]; then
+    warn "there is no $file in this working tree, so there is no configuration to paste"
+    hint "add it, naming $public, then re-run $SCRIPT_NAME --region $REGION_CODE"
+    return 0
+  fi
+  configured="$(addin_config_url "$file" || true)"
+  if [ "$configured" != "$public" ]; then
+    warn "$file points at $configured, but this deployment publishes to $public"
+    hint "fix the url in $file (bucket and key come from scripts/lib/common.sh), then re-run $SCRIPT_NAME --region $REGION_CODE"
+    return 0
+  fi
+  jq . "$file" || warn "could not read $file"
+}
+
 cleanup() {
   aws_err_cleanup
   if [ -n "$PLAN_DIR" ] && [ -d "$PLAN_DIR" ]; then
@@ -1072,7 +1098,7 @@ printf '\n'
 printf '%s\n' "In MyGeotab: System Settings -> Add-Ins -> Allow unverified Add-Ins, then New Add-In and"
 printf '%s\n' "paste this as the configuration (or replace the existing entry for this add-in):"
 printf '\n'
-addin_config_json "$REPO_ROOT/config.json" "$ADDIN_URL" || warn "could not read config.json for the add-in configuration"
+print_addin_config "$ADDIN_URL"
 printf '\n'
 printf '%s\n' "Onboard a customer:  scripts/onboard-customer.sh --region $REGION_CODE"
 ok "$DEPLOYMENT_NAME deployed in $AWS_REGION (account $AWS_ACCOUNT_ID)."

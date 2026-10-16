@@ -105,11 +105,15 @@ bucket with that region's `function_url` stamped in, and prints the configuratio
 | United States | `https://advone-addinhosting-us-east-2.s3.us-east-2.amazonaws.com/unassign/unassignDrivers.html` |
 
 Each deployment serves its own region's copy, so a database is never pointed at the other region by
-accident. In MyGeotab: **System Settings → Add-Ins → Allow unverified Add-Ins**, then **New Add-In**
-and paste the JSON the deploy printed. If the add-in is already installed, edit that entry instead —
-MyGeotab rejects a second add-in with the same name. MyGeotab keeps its own copy of the page once
-installed, so after a page-changing deploy, update the add-in's URL (or re-paste the config) to pull
-the new copy in.
+accident. The configuration to paste is committed per region — [`config.ca.json`](../config.ca.json)
+and [`config.us.json`](../config.us.json) — and the deploy prints that same file, after checking it
+against the page it actually uploaded (a config naming the other region's endpoint works fine in
+MyGeotab and fails silently, so it is worth failing the deploy over).
+
+In MyGeotab: **System Settings → Add-Ins → Allow unverified Add-Ins**, then **New Add-In** and paste
+that region's JSON. If the add-in is already installed, edit that entry instead — MyGeotab rejects a
+second add-in with the same name. MyGeotab keeps its own copy of the page once installed, so after a
+page-changing deploy, update the add-in's URL (or re-paste the config) to pull the new copy in.
 
 The buckets are not Terraform resources (they were made by hand and each region has one for all of
 Advantage One's add-ins). The deploy creates a missing one and applies, every run:

@@ -441,13 +441,18 @@ render_addin_html() { # <html file> <function url> -> HTML on stdout
   printf '%s\n' "$rendered"
 }
 
-# The MyGeotab add-in configuration an operator pastes in, pointing at a
-# published copy of the page (same name, service and version as the repo's).
-addin_config_json() { # <config.json file> <add-in url> -> JSON on stdout
-  local file="${1:-}" url="${2:-}"
-  [ -f "$file" ] || return 2
-  [ -n "$url" ] || return 2
-  jq --arg url "$url" '.items[0].url = $url' "$file"
+# The MyGeotab configuration an operator pastes in for a region: one committed
+# file per region, whose url names that region's published page. The deploy
+# prints the file as it is (and checks it against what it just published), so
+# what an operator pastes is what was reviewed here — a config naming the wrong
+# region's endpoint looks perfectly healthy in MyGeotab and fails silently.
+addin_config_path() { # <repo root> <code>
+  printf '%s/config.%s.json\n' "${1:-}" "${2:-}"
+}
+
+addin_config_url() { # <config file> -> the page url it points at
+  [ -f "${1:-}" ] || return 2
+  jq -r '.items[0].url // empty' "$1"
 }
 
 # ---------------------------------------------------------------------------

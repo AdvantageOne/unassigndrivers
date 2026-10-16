@@ -24,14 +24,22 @@ Docs: **[deployment guide](docs/aws-deployment-guide.md)** for operating it,
 
 ## Install the add-in in a MyGeotab database
 
-For an AWS deployment, `scripts/deploy.sh` publishes the page and prints the configuration to paste
-(it points at that region's copy, with the region's endpoint already stamped in):
+One file per region, naming that region's published page (the deploy prints the same file after
+checking it against what it just uploaded):
+
+| Database | Configuration to paste |
+|---|---|
+| Canada (`ca-central-1`) | [`config.ca.json`](config.ca.json) — `https://advone-addin-hosting-ca-central-1.s3.ca-central-1.amazonaws.com/unassign/unassignDrivers.html` |
+| United States (`us-east-2`) | [`config.us.json`](config.us.json) — `https://advone-addinhosting-us-east-2.s3.us-east-2.amazonaws.com/unassign/unassignDrivers.html` |
 
 1. Open **System Settings → Add-Ins** and turn on **Allow unverified Add-Ins**.
-2. Click **New Add-In** and paste the printed JSON into **Configuration**. If the add-in is already
+2. Click **New Add-In** and paste that region's JSON into **Configuration**. If the add-in is already
    installed, edit the existing entry instead, because MyGeotab rejects a second add-in with the same
    name.
 3. Click **Done**, then **Save**, and refresh the browser.
+
+MyGeotab keeps its own copy of the page once installed, so after a deploy that changes the page,
+update the add-in entry (or re-paste its configuration) to pull the new copy in.
 
 To install it without a deployment, use [`config.json`](config.json), which loads the page from
 jsDelivr (the repo's copy is committed pointing at the Canada endpoint). Either way the add-in reads
@@ -69,7 +77,9 @@ still republishes the add-in page, so add-in fixes ship with the same command. S
 
 ```
 unassignDrivers.html            the add-in; built regions are generated (see below)
-config.json                     add-in configuration published to MyGeotab (jsDelivr tag)
+config.ca.json                  add-in configuration for the Canada database (S3 page)
+config.us.json                  add-in configuration for the United States database (S3 page)
+config.json                     standalone/legacy install; loads the page from jsDelivr
 config.pages.json               legacy GitHub Pages config, unused
 src/core/unassign-core.js       schedule math, lock, unassign, run log (shared: add-in + Lambda)
 src/addin/api-client.js         browser client for the scheduling service
