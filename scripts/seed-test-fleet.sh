@@ -41,6 +41,10 @@ ADMIN_GROUP_ID="GroupEverythingSecurityId"
 # driver additionally needs a security *clearance* ("-32000: User's
 # SecurityGroups cannot be null or empty").
 COMPANY_GROUP_ID="GroupCompanyId"
+# MyGeotab files a new asset in its built-in Vehicle group (its own add-asset
+# request does), which is also the group a schedule is likely scoped to. Checked
+# against the database before use, falling back to the company group.
+ASSET_GROUP_ID="GroupVehicleId"
 # The built-in clearances are named Group<Role>SecurityId (this repo already
 # relies on GroupEverythingSecurityId), so a Driver one is found by shape, not by
 # a name that is translated. When a database does not expose one, the clearance
@@ -51,6 +55,7 @@ SECURITY_GROUP_ID=""
 SECURITY_GROUP_SOURCE=""
 CALLER_SECURITY_GROUP_IDS=""
 COMPANY_GROUP_NAME=""
+ASSET_GROUP_NAME=""
 SEED_GROUPS="[]"
 
 usage() {
@@ -89,9 +94,10 @@ never written to a file or a log.
 
 What it creates (all names carry one batch id):
   <N> drivers   Add User   { isDriver: true, name: A1SEED-<stamp>-Driver-NN }
-  <N> assets    Add Device { name: A1SEED-<stamp>-Asset-NN, groups: [Company] }
-                (no serial number: MyGeotab validates those, and a test asset
-                does not need one)
+  <N> assets    Add Device { name: A1SEED-<stamp>-Asset-NN, serialNumber: "",
+                            groups: [Vehicle], activeFrom/activeTo }
+                (blank serial number, as MyGeotab's own add-asset sends: it
+                validates serial numbers and refused an invented one)
   <N> assignments  Add DriverChange { device, driver, dateTime, type: "Driver" }
 
 Then it reads the assignments back the way the service does (a DriverChange
@@ -194,6 +200,16 @@ seed_known_clearance_ids() { # <groups json> <caller's ids, newline>
   } | grep . | sort -u
 }
 
+# Where an asset is filed: MyGeotab's own add-asset request uses its built-in
+# Vehicle group, but a database without that group still needs somewhere.
+seed_asset_group_id() { # <groups json>
+  if seed_group_exists "${1:-}" "$ASSET_GROUP_ID"; then
+    printf '%s\n' "$ASSET_GROUP_ID"
+  else
+    printf '%s\n' "$COMPANY_GROUP_ID"
+  fi
+}
+
 # Which clearance the seeded drivers get, and where it came from:
 #   <requested>            the operator's --security-group, if the database has it
 #   a built-in Driver one  Get Group exposed it (the semantically right choice)
@@ -230,12 +246,15 @@ seed_user_json() { # <name> <index> <company group id> <security group id> <pass
       companyGroups: [{id: $company}], securityGroups: [{id: $security}], password: $password}'
 }
 
-# The same for an asset: Device.groups, or MyGeotab has nowhere to file it. No
-# serialNumber: MyGeotab validates serial numbers and refused the one this used
-# to invent, and a test asset does not need one.
-seed_device_json() { # <name> <group id>
-  jq -n --arg name "${1:-}" --arg group "${2:-}" \
-    '{name: $name, groups: [{id: $group}]}'
+# The same for an asset, shaped like MyGeotab's own add-asset request (captured
+# from the UI): a group, a blank serial number — MyGeotab validates serial
+# numbers and refused an invented one, and blank is what the UI sends when the
+# field is left empty — and the active window, so the asset is active now (the
+# service only looks at assets active as of the run).
+seed_device_json() { # <name> <group id> <active from iso8601>
+  jq -n --arg name "${1:-}" --arg group "${2:-}" --arg activeFrom "${3:-}" \
+    '{name: $name, serialNumber: "", groups: [{id: $group}],
+      activeFrom: $activeFrom, activeTo: "2050-01-01T00:00:00.000Z"}'
 }
 
 # The assignment itself — the same entity the service writes to clear a fleet,
@@ -461,8 +480,11 @@ resolve_groups() {
   SECURITY_GROUP_ID="$(printf '%s' "$chosen" | cut -f1)"
   SECURITY_GROUP_SOURCE="$(printf '%s' "$chosen" | cut -f2)"
   COMPANY_GROUP_NAME="$(seed_group_name "$SEED_GROUPS" "$COMPANY_GROUP_ID")"
+  ASSET_GROUP_ID="$(seed_asset_group_id "$SEED_GROUPS")"
+  ASSET_GROUP_NAME="$(seed_group_name "$SEED_GROUPS" "$ASSET_GROUP_ID")"
   ok "drivers get the clearance $SECURITY_GROUP_ID (from $SECURITY_GROUP_SOURCE)"
-  info "records belong to the '$COMPANY_GROUP_NAME' group ($COMPANY_GROUP_ID)"
+  info "drivers belong to the '$COMPANY_GROUP_NAME' group ($COMPANY_GROUP_ID)"
+  info "assets belong to the '$ASSET_GROUP_NAME' group ($ASSET_GROUP_ID)"
 }
 
 # Every entity goes through the pure builders above, so what is sent is exactly
@@ -481,7 +503,7 @@ add_devices() { # -> ids on stdout, one per line
   local i name id
   for ((i = 1; i <= COUNT; i++)); do
     name="$(seed_name "$BATCH" Asset "$i")"
-    id="$(add_one "Device" "$(seed_device_json "$name" "$COMPANY_GROUP_ID")" "asset $name")" || return 1
+    id="$(add_one "Device" "$(seed_device_json "$name" "$ASSET_GROUP_ID" "$SEED_FROM")" "asset $name")" || return 1
     printf '%s\n' "$id"
   done
 }
@@ -610,6 +632,7 @@ run_selftest() {
     {"id":"GroupCompanyId","name":"Company Group"},
     {"id":"GroupEverythingSecurityId","name":"Everything"},
     {"id":"GroupDriverSecurityId","name":"Driver"},
+    {"id":"GroupVehicleId","name":"Vehicle"},
     {"id":"b42","name":"Drivers - Toronto"}
   ]'
   st_true "an id in the database is accepted" seed_group_exists "$groups" "GroupCompanyId"
@@ -677,11 +700,20 @@ run_selftest() {
         "$(printf '%s' "$user" | jq -r '.companyGroups[0].id')"
   st_eq "the driver has a clearance" "GroupDriverSecurityId" \
         "$(printf '%s' "$user" | jq -r '.securityGroups[0].id')"
-  device="$(seed_device_json "A1SEED-x-Asset-01" "GroupCompanyId")"
+  # The shape MyGeotab's own add-asset request uses, captured from the UI.
+  device="$(seed_device_json "A1SEED-x-Asset-01" "GroupVehicleId" "2026-10-16T22:16:14.954Z")"
   st_eq "device name" "A1SEED-x-Asset-01" "$(printf '%s' "$device" | jq -r .name)"
-  st_eq "the asset belongs to the company group" "GroupCompanyId" "$(printf '%s' "$device" | jq -r '.groups[0].id')"
-  # MyGeotab validates serial numbers and refused the invented one, so none is sent.
-  st_eq "the asset carries no serial number" "groups name" "$(printf '%s' "$device" | jq -r 'keys | join(" ")')"
+  st_eq "the asset belongs to the Vehicle group" "GroupVehicleId" "$(printf '%s' "$device" | jq -r '.groups[0].id')"
+  st_eq "the serial number is blank, not invented" "" "$(printf '%s' "$device" | jq -r .serialNumber)"
+  st_eq "the asset is active from now" "2026-10-16T22:16:14.954Z" "$(printf '%s' "$device" | jq -r .activeFrom)"
+  st_eq "the asset stays active" "2050-01-01T00:00:00.000Z" "$(printf '%s' "$device" | jq -r .activeTo)"
+  st_eq "device fields are what MyGeotab's own request carries" \
+        "activeFrom activeTo groups name serialNumber" \
+        "$(printf '%s' "$device" | jq -r 'keys | join(" ")')"
+  st_eq "the Vehicle group is used when the database has it" "GroupVehicleId" \
+        "$(seed_asset_group_id "$groups")"
+  st_eq "a database without it files assets in the company group" "GroupCompanyId" \
+        "$(seed_asset_group_id '[{"id":"GroupCompanyId","name":"Company Group"}]')"
   change="$(seed_driverchange_json "b1" "b2" "2026-10-16T13:30:00.000Z")"
   st_eq "an assignment is a DriverChange for the device" "b1" "$(printf '%s' "$change" | jq -r .device.id)"
   st_eq "an assignment names the driver" "b2" "$(printf '%s' "$change" | jq -r .driver.id)"
@@ -699,6 +731,8 @@ run_selftest() {
   # Both shapes reach it: the JSON-RPC envelope, and the already-unwrapped result
   # that rpc_result hands over.
   st_eq "the id, from the envelope" "b1" "$(printf '%s' '{"result":[{"id":"b1"}]}' | rpc_first_id)"
+  # What a live MyGeotab answered for an Add Device: a bare id, not a list.
+  st_eq "the id, as MyGeotab returned it live" "b58" "$(printf '%s' '{"result":"b58"}' | rpc_first_id)"
   st_eq "the id, from the unwrapped result" "b1" "$(printf '%s' '[{"id":"b1"}]' | rpc_first_id)"
   st_eq "the id from a nested result" "b1" "$(printf '%s' '[[{"id":"b1"}]]' | rpc_first_id)"
   st_eq "the id from a bare string" "b1" "$(printf '%s' '["b1"]' | rpc_first_id)"
@@ -744,7 +778,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
   printf '%s\n' "  database : $DATABASE"
   printf '%s\n' "  server   : $SERVER"
   printf '%s\n' "  batch    : $BATCH"
-  printf '%s\n' "  groups   : drivers in '$COMPANY_GROUP_NAME'; clearance $SECURITY_GROUP_ID (from $SECURITY_GROUP_SOURCE)"
+  printf '%s\n' "  groups   : drivers in '$COMPANY_GROUP_NAME' with clearance $SECURITY_GROUP_ID (from $SECURITY_GROUP_SOURCE)"
+  printf '%s\n' "             assets in '$ASSET_GROUP_NAME'"
   printf '%s\n' "  would add: $COUNT drivers (Add User, isDriver: true, each with its own random password)"
   printf '%s\n' "             $COUNT assets (Add Device)"
   printf '%s\n' "             $COUNT assignments (Add DriverChange, driver named, type Driver)"
