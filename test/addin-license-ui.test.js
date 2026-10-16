@@ -28,8 +28,25 @@ const STAFF_REGISTERED = { staff: true, setupAllowed: true, licensed: true, onbo
 const TENANT_LICENSED = { staff: false, setupAllowed: false, licensed: true, onboarded: true, workerConfigured: true };
 const TENANT_UNLICENSED = { staff: false, setupAllowed: false, licensed: false, onboarded: true, workerConfigured: true };
 
-function uiSource(baseUrl) {
-  const html = readFileSync(HTML, "utf8");
+function addinHtml() {
+  return readFileSync(HTML, "utf8");
+}
+
+/** The ids the markup ships hidden, so the harness starts where a browser does. */
+function hiddenInMarkup(html) {
+  const hidden = new Set();
+  for (const match of html.matchAll(/<[a-z]+[^>]*>/g)) {
+    const tag = match[0];
+    const id = (tag.match(/\bid="([^"]+)"/) || [])[1];
+    if (!id) continue;
+    // The class may sit on either side of the id.
+    const classes = (tag.match(/class="([^"]*)"/) || [])[1] || "";
+    if (/a1ud-hidden/.test(classes)) hidden.add(id);
+  }
+  return hidden;
+}
+
+function uiSource(html, baseUrl) {
   const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
   assert.equal(blocks.length, 3, "the add-in has three script blocks");
   let source = blocks[2];
@@ -42,10 +59,11 @@ function uiSource(baseUrl) {
  * The add-in looks its elements up inside its own root (`root.querySelector`),
  * so every lookup must land on the same object the assertions read.
  */
-function fakeElement(id, registry) {
-  const classes = new Set(["a1ud-hidden"]);
+function fakeElement(id, registry, hidden) {
+  const classes = new Set(hidden ? ["a1ud-hidden"] : []);
   const counters = { listeners: 0 };
-  return {
+  const handlers = {};
+  const element = {
     id,
     get listeners() { return counters.listeners; },
     textContent: "",
@@ -67,11 +85,20 @@ function fakeElement(id, registry) {
     },
     querySelector: (selector) => registry(String(selector).replace(/^#/, "")),
     querySelectorAll: () => [],
-    addEventListener: () => { counters.listeners += 1; },
+    addEventListener: (type, handler) => {
+      counters.listeners += 1;
+      (handlers[type] || (handlers[type] = [])).push(handler);
+    },
+    /** Drives the bound handlers, the way a click on the real button would. */
+    fire: (type) => {
+      const event = { target: element, preventDefault: () => {}, stopPropagation: () => {} };
+      (handlers[type] || []).forEach((handler) => handler(event));
+    },
     insertAdjacentHTML: () => {},
     getAttribute: () => null,
     setAttribute: () => {}
   };
+  return element;
 }
 
 function load(options) {
@@ -80,8 +107,10 @@ function load(options) {
   const calls = { license: 0, listSchedules: 0, saveWorkerCredentials: 0 };
   const started = [];
 
+  const html = addinHtml();
+  const hiddenAtStart = hiddenInMarkup(html);
   const element = (id) => {
-    if (!elements.has(id)) elements.set(id, fakeElement(id, element));
+    if (!elements.has(id)) elements.set(id, fakeElement(id, element, hiddenAtStart.has(id)));
     return elements.get(id);
   };
   const visible = (id) => !element(id).classList.contains("a1ud-hidden");
@@ -124,7 +153,7 @@ function load(options) {
     querySelector: (selector) => element(String(selector).replace(/^#/, "")),
     querySelectorAll: () => [],
     addEventListener: () => {},
-    createElement: () => fakeElement("created"),
+    createElement: () => fakeElement("created", element),
     head: { appendChild: () => {} }
   };
 
@@ -143,7 +172,7 @@ function load(options) {
 
   const factory = new Function(
     "geotab", "A1UnassignCore", "A1UnassignApi", "document", "window", "navigator", "setInterval", "clearInterval", "setTimeout", "console",
-    `${uiSource(settings.baseUrl === undefined ? "https://example.lambda-url.ca-central-1.on.aws" : settings.baseUrl)}
+    `${uiSource(html, settings.baseUrl === undefined ? "https://example.lambda-url.ca-central-1.on.aws" : settings.baseUrl)}
      return geotab.addin.unassignDrivers ? geotab.addin.unassignDrivers() : null;`
   );
   const addin = factory(
@@ -153,8 +182,9 @@ function load(options) {
 
   /** MyGeotab hands the add-in a brand-new page element when the user returns. */
   const rebuild = () => { elements.set("unassignDrivers", fakeElement("unassignDrivers", element)); };
+  const click = (id) => element(id).fire("click");
 
-  return { addin, api, calls, element, visible, rebuild, settings };
+  return { addin, api, calls, click, element, visible, rebuild, settings };
 }
 
 /** initialize() resolves its callback before startServerMode() finishes. */
@@ -175,6 +205,8 @@ test("staff on a database with no service account get the setup panel, not the o
   assert.equal(h.calls.listSchedules, 0, "nothing to list yet: asking only earns a refusal");
   assert.equal(h.visible("a1ud-app"), true);
   assert.equal(h.visible("a1ud-setup-card"), true, "the panel that fixes this must be on screen");
+  assert.equal(h.visible("a1ud-tab-service"), true, "staff must land on the tab that holds the form");
+  assert.equal(h.visible("a1ud-tab-scheduler"), false);
   assert.equal(h.visible("a1ud-license-modal"), false, "a missing registration is not a licence problem");
   assert.match(h.element("a1ud-worker-state").textContent, /No service account is configured yet/);
   assert.match(h.element("a1ud-schedules-msg").textContent, /save a service account above/);
@@ -186,6 +218,8 @@ test("staff on a registered database keep the setup panel and see their schedule
   assert.equal(h.calls.listSchedules, 1);
   assert.equal(h.visible("a1ud-setup-card"), true);
   assert.equal(h.visible("a1ud-license-modal"), false);
+  assert.equal(h.visible("a1ud-tab-scheduler"), true, "a registered database opens on the scheduler");
+  assert.equal(h.visible("a1ud-tab-service"), false);
   assert.match(h.element("a1ud-worker-state").textContent, /already configured/);
 });
 
@@ -196,6 +230,8 @@ test("a licensed tenant gets the app, no setup panel and no overlay", async () =
   assert.equal(h.visible("a1ud-app"), true);
   assert.equal(h.visible("a1ud-setup-card"), false);
   assert.equal(h.visible("a1ud-license-modal"), false);
+  assert.equal(h.visible("a1ud-tab-scheduler"), true);
+  assert.equal(h.visible("a1ud-tab-service"), false, "a customer has no credentials form to fill in");
 });
 
 test("an unlicensed tenant gets the overlay and no schedule request", async () => {
@@ -244,6 +280,54 @@ test("legacy mode never calls the service and reveals nothing new", async () => 
   assert.equal(h.calls.listSchedules, 0);
   assert.equal(h.visible("a1ud-license-modal"), false);
   assert.equal(h.visible("a1ud-setup-card"), false);
+});
+
+test("saving the service account registers the database and hands back the schedules", async () => {
+  const h = await start({ license: LICENSED_NOT_REGISTERED });
+  assert.equal(h.visible("a1ud-tab-service"), true);
+
+  h.element("a1ud-worker-user").value = "svc-unassign@example.com";
+  h.element("a1ud-worker-pass").value = "correct horse battery";
+  h.element("a1ud-worker-server").value = "my.geotab.com";
+  h.element("a1ud-worker-license").checked = true;
+  // The service now reports the database as registered and licensed.
+  h.settings.license = STAFF_REGISTERED;
+
+  h.click("a1ud-worker-save");
+  await settle();
+
+  assert.equal(h.calls.saveWorkerCredentials, 1);
+  assert.equal(h.element("a1ud-worker-pass").value, "", "the password must not linger in the field");
+  assert.equal(h.visible("a1ud-tab-scheduler"), true, "the user is handed their schedules");
+  assert.equal(h.visible("a1ud-tab-service"), false);
+  assert.equal(h.calls.listSchedules, 1);
+});
+
+test("the credentials form lives on the service tab, not mid-page on the scheduler", () => {
+  const html = addinHtml();
+
+  const block = (id) => {
+    const at = html.indexOf(`id="${id}"`);
+    assert.ok(at > -1, `${id} is missing from the add-in`);
+    const open = html.indexOf(">", at) + 1;
+    let depth = 1;
+    const tags = /<(\/?)div\b[^>]*>/g;
+    tags.lastIndex = open;
+    let match;
+    while ((match = tags.exec(html))) {
+      depth += match[1] ? -1 : 1;
+      if (depth === 0) return html.slice(open, match.index);
+    }
+    return assert.fail(`unbalanced markup around ${id}`);
+  };
+
+  const service = block("a1ud-tab-service");
+  assert.match(service, /id="a1ud-setup-card"/, "the setup panel must be on the tab named after it");
+  assert.match(service, /id="a1ud-worker-user"/);
+  assert.match(service, /id="a1ud-worker-pass"/);
+  assert.match(service, /id="a1ud-worker-save"/);
+  assert.doesNotMatch(block("a1ud-tab-scheduler"), /id="a1ud-setup-card"/, "not buried under the scheduler");
+  assert.match(html, /Please contact your CSR to enable your license/);
 });
 
 test("the licence decision is re-applied when MyGeotab rebuilds the page", async () => {
