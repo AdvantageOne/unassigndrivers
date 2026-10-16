@@ -996,10 +996,11 @@ geotab.addin.unassignDrivers = function () {
   var DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var EXTRA_ALLOWED_SECURITY_GROUP_IDS = []; // add custom clearance IDs here if needed
 
-  // Point this at the deployment's Lambda Function URL to schedule on AWS
-  // (see docs/aws-deployment-guide.md). Empty string keeps the original
-  // in-browser scheduler, which only runs while this page is open.
-  var SERVER_API_BASE = "";
+  // The deployment's Lambda Function URL (the Canada deployment). Empty string
+  // keeps the original in-browser scheduler, which only runs while this page is
+  // open; see docs/aws-deployment-guide.md. Multi-region routing is not decided
+  // yet, so this is one endpoint for now.
+  var SERVER_API_BASE = "https://yfzpzulqadv5r7rkbtbenmphiy0xrdnl.lambda-url.ca-central-1.on.aws";
   var client = null;          // A1UnassignApi client, created on first use
   var serverBound = false;    // controls in "Scheduled runs" are bound once
   var editingName = null;     // name of the schedule the form is editing

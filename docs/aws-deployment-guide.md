@@ -91,11 +91,14 @@ by the OpenTofu state lock, not by a double apply.
 
 ## 4. Point the add-in at the deployment
 
-In `unassignDrivers.html`, set the constant at the top of the add-in's `<script>` block to the
-`function_url` output:
+`SERVER_API_BASE`, at the top of the add-in's `<script>` block, is where the add-in calls. It is
+committed pointing at the **Canada** deployment
+(`https://yfzpzulqadv5r7rkbtbenmphiy0xrdnl.lambda-url.ca-central-1.on.aws`); multi-region routing is
+not decided yet, so every tenant currently talks to that one endpoint. To point a build elsewhere,
+change the constant and re-release the add-in:
 
 ```js
-var SERVER_API_BASE = "https://abcdefghijkl.lambda-url.ca-central-1.on.aws";
+var SERVER_API_BASE = "https://<the function_url output>";
 ```
 
 Then publish the add-in as usual (see the README's release steps). With that value set the add-in
@@ -103,17 +106,28 @@ shows a **Scheduled runs** card, hides the in-browser-only controls (grace windo
 stops running schedules from the browser tab. With it empty, the add-in keeps its original
 in-browser scheduler.
 
-CORS has exactly one owner: the Function URL. Its `cors` block carries the origins from
-`ALLOWED_ORIGINS` (a Terraform variable), so add the add-in's frame origin — `https://cdn.jsdelivr.net`
-for the jsDelivr-hosted build — and any `https://<database>.my.geotab.com` origin in use, then
-re-apply. Lambda adds those headers to every response and answers the preflight itself, which is why
-the function adds none: if both did, the browser would reject the response as having multiple
-`Access-Control-Allow-Origin` values. Two consequences worth knowing:
+The add-in's frame is served from a MyGeotab host, and those hosts are `geotab.com` subdomains, so
+`allowed_origins` defaults to the pattern `"https://*.geotab.com"` — that covers `my.geotab.com`,
+`myg-static.geotab.com`, regional hosts and anything else Geotab serves add-ins from, without listing
+them. Entries are exact origins or patterns where `*` stands for any run of characters that does not
+cross a `/`, compared case-insensitively; `https://geotab.com`, `https://evil-geotab.com` and
+`https://my.geotab.com.evil.com` are all refused. Add `"https://cdn.jsdelivr.net"` only if the add-in
+ever ends up in a frame served from jsDelivr rather than from MyGeotab.
 
-- `allow_methods` is `["POST"]`. The Lambda API caps each member at six characters, so `OPTIONS`
-  cannot be listed; it does not need to be, because the browser checks the *actual* request method.
-- A request from an origin that is not listed never reaches the function: Lambda refuses it at the
-  edge. The function checks the origin again, as a second gate, when something invokes it directly.
+Two layers, and only one of them can hold a pattern:
+
+- **The Function URL's `cors` block** adds the headers and answers the preflight itself. The Lambda
+  API accepts exact origins or a bare `*` — no patterns — so when `allowed_origins` contains a
+  pattern, Terraform widens the URL's list to `*` and the function enforces the real policy
+  (`isOriginAllowed` in `src/lambda/http.js`). The function adds no CORS headers of its own: with the
+  URL's headers in play, both sets would appear and the browser would reject the response for having
+  multiple `Access-Control-Allow-Origin` values.
+- **The function's own check** runs on every request and answers `403 ADDIN_ACCESS_DENIED` for an
+  origin that does not match. That is the gate that still applies when something invokes the function
+  directly rather than through the URL.
+
+`allow_methods` is `["POST"]` for a related API quirk: each member is capped at six characters, so
+`OPTIONS` cannot be listed, and the browser checks the *actual* request method anyway.
 
 ## 5. Onboard a customer
 
@@ -239,7 +253,7 @@ Log lines are JSON and include `outcome`, `action`, `database`, `unassigned`, `s
 | Symptom | Likely cause | Action |
 |---|---|---|
 | Add-in shows "Add-In access denied" for everyone | `addIn.securityId.id` is empty, or the caller's clearance groups do not carry the add-in's filter | Do step 2 of §2; check `clearance` flags in the config |
-| Every request denied with `403` and no log of an action | Origin not in `ALLOWED_ORIGINS` (Lambda refuses it before the function runs) | Add the add-in's frame origin and re-apply |
+| Every request denied with `403` and no log of an action | The origin does not match any entry in `allowed_origins` (exact, or a pattern with `*`) | Check the browser's actual frame origin (`document.location.origin` in the add-in) and add it as an exact origin or pattern, then re-apply |
 | Browser console: "Access-Control-Allow-Origin header contains multiple values" | Something re-added CORS headers in the function, on top of the Function URL's | Delete them from `src/lambda/http.js`; the Function URL is the only owner |
 | `ValidationException: Value '[POST, OPTIONS]' at 'cors.allowMethods'` during apply | `OPTIONS` was added to `allow_methods` | Keep `allow_methods = ["POST"]`; Lambda answers the preflight and rejects `OPTIONS` (members are capped at six characters) |
 | `401 SESSION_INVALID` | The forwarded session expired, or `sessionId` was not sent | Confirm the add-in's `getSession()` shape (§2.3) |

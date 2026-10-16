@@ -177,6 +177,12 @@ run_selftest() {
 
   st_eq "tenant schedule-group prefix is the contract default" "UnassignDriverSchedules" "$SCHEDULE_GROUP_PREFIX"
 
+  st_eq "a pattern becomes a concrete origin for the CORS probe" "https://my.geotab.com" \
+        "$(probe_origin_from_pattern 'https://*.geotab.com')"
+  st_eq "an exact origin is left alone" "https://my.geotab.com" "$(probe_origin_from_pattern 'https://my.geotab.com')"
+  st_eq "a bare wildcard probes the MyGeotab origin" "https://my.geotab.com" "$(probe_origin_from_pattern '*')"
+  st_eq "an empty entry probes the MyGeotab origin" "https://my.geotab.com" "$(probe_origin_from_pattern '')"
+
   st_eq "state key lives under the service prefix" "scheduled-driver-unassign/terraform.tfstate" "$STATE_KEY"
   st_eq "ownership marker lives under the same prefix" "scheduled-driver-unassign/deployment.json" "$DEPLOYMENT_MARKER_KEY"
   st_eq "the pre-prefix state key is still tracked for migration" "unassign/terraform.tfstate" "$LEGACY_STATE_KEY"
@@ -703,7 +709,9 @@ smoke_test_cors() { # <function-name> <function-url>
     hint "set allowed_origins in infra/live/$REGION_CODE and re-run $SCRIPT_NAME --region $REGION_CODE"
     return 0
   fi
-  origin="${allowed%%,*}"
+  # The first configured origin, turned into a real value: a pattern like
+  # https://*.geotab.com cannot be sent as an Origin header.
+  origin="$(probe_origin_from_pattern "${allowed%%,*}")"
   headers="$(mktemp "${TMPDIR:-/tmp}/unassign-cors.XXXXXX")"
   rc=0
   curl -sS -o /dev/null -D "$headers" -X OPTIONS "$url" \

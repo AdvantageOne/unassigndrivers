@@ -206,7 +206,10 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 12. **CORS belongs to the Function URL, not the function.** `allow_methods` accepts only values of
     six characters or fewer, so `OPTIONS` cannot be listed — that is not a bug to work around, and
     Lambda answers the preflight itself. Adding `access-control-*` headers in `src/lambda/http.js`
-    produces duplicate headers and a browser-level rejection.
+    produces duplicate headers and a browser-level rejection. `allow_origins` has the same kind of
+    limit: exact origins or a bare `*`, never a pattern. That is why `allowed_origins` may hold
+    `https://*.geotab.com` (Terraform then widens the URL's list to `*`) while the matcher in
+    `src/lambda/http.js` remains the policy — test look-alikes there, not just the happy path.
 13. **Licensing is enforced by the service, not by the modal.** Every tenant action returns
     `403 LICENSE_REQUIRED` when `customers.<db>.license.licensed !== true`, staff are exempt, and
     scheduled runs deliberately keep firing (a billing flag must not stop a fleet process). The

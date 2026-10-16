@@ -38,7 +38,9 @@ running schedules in the browser while a tab is open.
 ## Release a new version of the add-in
 
 1. Edit the sources, not the built file: schedule logic lives in `src/core/unassign-core.js`, the
-   service client in `src/addin/api-client.js`, and the UI in `unassignDrivers.html`.
+   service client in `src/addin/api-client.js`, and the UI in `unassignDrivers.html`. In that last
+   file, check that `SERVER_API_BASE` still points at the deployment you mean — it is baked into the
+   add-in and currently names the Canada endpoint.
 2. Run `pnpm test` (this includes a check that the built file matches `src/`) and `pnpm run build:addin`.
 3. Bump `version` in [`config.json`](config.json) and publish a release with a **new** tag that
    matches (for example `v2.0.1`). Never move or reuse a tag: jsDelivr caches each tag permanently.

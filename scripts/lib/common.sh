@@ -559,6 +559,16 @@ backend_hcl_key() {
     | sed -E 's/^[^=]*=[[:space:]]*"([^"]*)".*$/\1/'
 }
 
+# probe_origin_from_pattern <pattern> -> a concrete Origin value for a CORS probe.
+# Patterns are an internal convention (see probeOrigin in src/lambda/http.js) and
+# are not valid Origin headers, so the first "*" becomes a label.
+probe_origin_from_pattern() {
+  case "${1:-}" in
+    "" | "*") printf '%s' "https://my.geotab.com" ;;
+    *) printf '%s' "${1/\*/my}" ;;
+  esac
+}
+
 # filter_our_state_keys: stdin = object keys, stdout = this service's tfstate
 # keys. Other services share the deploy bucket, so their state must never be
 # counted as ours (and vice versa).

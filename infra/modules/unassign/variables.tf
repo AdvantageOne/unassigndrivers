@@ -20,7 +20,7 @@ variable "config_key" {
 }
 
 variable "allowed_origins" {
-  description = "Origins allowed to call the Lambda Function URL (the MyGeotab add-in frame origins). Empty list removes CORS access."
+  description = "Origins allowed to call the Lambda Function URL (the MyGeotab add-in frame origins). Exact origins or patterns where * stands for any label (https://*.geotab.com). A pattern makes the function URL accept any origin and leaves enforcement to the function. Empty list removes CORS access."
   type        = list(string)
 }
 

@@ -14,6 +14,12 @@ locals {
   # block does not depend on aws_lambda_function.api (that would be a cycle).
   function_arn = "arn:${local.partition}:lambda:${var.region}:${local.account_id}:function:${local.function_name}"
 
+  # The Lambda Function URL CORS list accepts exact origins or a bare "*"; it has
+  # no pattern syntax. When one of the configured origins is a pattern (the
+  # add-in's frame is a *.geotab.com host, say) the URL list widens to "*" and the
+  # function enforces the real policy — see isOriginAllowed in src/lambda/http.js.
+  function_url_origins = length([for origin in var.allowed_origins : origin if strcontains(origin, "*")]) > 0 ? ["*"] : var.allowed_origins
+
   scheduler_arn_prefix = "arn:${local.partition}:scheduler:${var.region}:${local.account_id}"
   schedules_arn        = "${local.scheduler_arn_prefix}:schedule/${var.schedule_group_prefix}-*/*"
   schedule_groups_arn  = "${local.scheduler_arn_prefix}:schedule-group/${var.schedule_group_prefix}-*"
@@ -372,7 +378,7 @@ resource "aws_lambda_function_url" "api" {
     # CORS is configured on the function URL. Only the real request method goes
     # in this list.
     allow_methods = ["POST"]
-    allow_origins = var.allowed_origins
+    allow_origins = local.function_url_origins
     max_age       = 600
   }
 }

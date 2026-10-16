@@ -55,11 +55,38 @@ function parseEvent(event) {
   };
 }
 
+/**
+ * Origin matching, with wildcards.
+ *
+ * The Lambda Function URL's own CORS list accepts only exact origins or a bare
+ * `*`, so a pattern like `https://*.geotab.com` cannot live there. Terraform
+ * therefore widens the URL's list to `*` when a pattern is configured, and this
+ * function is where the real policy is enforced: an origin must match one of the
+ * configured entries exactly, or match a pattern whose `*` stands for any run of
+ * characters that does not cross a `/`.
+ */
+function originMatches(pattern, origin) {
+  if (!pattern) return false;
+  if (pattern === origin) return true;
+  if (!pattern.includes("*")) return false;
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, "[^/]*");
+  return new RegExp("^" + escaped + "$", "i").test(origin);
+}
+
 function isOriginAllowed(origin, allowedOrigins) {
   const allowed = allowedOrigins || [];
   if (!origin) return true; // server-to-server (the deploy script's smoke test)
   if (allowed.includes("*")) return true;
-  return allowed.includes(origin);
+  const candidate = String(origin).replace(/\/+$/, "");
+  return allowed.some((pattern) => originMatches(String(pattern).replace(/\/+$/, ""), candidate));
+}
+
+/** A concrete origin for probing CORS from a pattern (the deploy script's smoke test). */
+function probeOrigin(pattern) {
+  if (!pattern || pattern === "*") return "https://my.geotab.com";
+  return String(pattern).replace("*", "my");
 }
 
 /** Response headers this function owns. CORS headers come from the function URL. */
@@ -99,4 +126,16 @@ function preflight(origin, allowedOrigins) {
   return respond(204, {}, origin, allowedOrigins);
 }
 
-module.exports = { parseEvent, decodeJsonBody, header, isOriginAllowed, responseHeaders, respond, ok, failure, preflight };
+module.exports = {
+  parseEvent,
+  decodeJsonBody,
+  header,
+  isOriginAllowed,
+  originMatches,
+  probeOrigin,
+  responseHeaders,
+  respond,
+  ok,
+  failure,
+  preflight
+};

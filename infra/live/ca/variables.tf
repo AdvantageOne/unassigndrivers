@@ -1,7 +1,7 @@
 variable "allowed_origins" {
-  description = "Origins allowed to call the Lambda Function URL (the MyGeotab add-in frame origins)."
+  description = "Origins allowed to call the Lambda Function URL. Exact origins, or patterns where * stands for any label (https://*.geotab.com covers the MyGeotab hosts); a pattern makes the URL accept any origin and leaves enforcement to the function."
   type        = list(string)
-  default     = ["https://my.geotab.com"]
+  default     = ["https://*.geotab.com"]
 }
 
 variable "alarm_email" {
