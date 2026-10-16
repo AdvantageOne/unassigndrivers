@@ -9,10 +9,10 @@ written back to the tenant's own MyGeotab database as a run log.
 
 | | |
 |---|---|
-| Add-in | `unassignDrivers.html`, loaded by MyGeotab through jsDelivr, pinned to a release tag |
+| Add-in | `unassignDrivers.html`; `scripts/deploy.sh` publishes it to the region's hosting bucket (`unassign/unassignDrivers.html`) with that region's endpoint stamped in. The repo copy and `config.json` serve the jsDelivr path |
 | Scheduling | One Lambda + EventBridge Scheduler per region: Canada `ca-central-1`, United States `us-east-2` |
 | Tenant config | `s3://<deployment>-config/config/customers.json` |
-| Credentials | One AWS Secrets Manager secret per tenant (`unassign/<database>`) |
+| Credentials | One AWS Secrets Manager secret per tenant (`unassign/<database>/serviceaccount`) |
 | Deploy | `scripts/deploy.sh` (asks Canada or United States, then plans and applies) |
 | Licensing | Per database, in the deployment config. Advantage One staff can register a database and license it from the add-in's setup panel; anyone else on an unlicensed database sees a "contact your CSR" message instead of the scheduler |
 | Support | jordan@advtracking.net |
@@ -24,23 +24,29 @@ Docs: **[deployment guide](docs/aws-deployment-guide.md)** for operating it,
 
 ## Install the add-in in a MyGeotab database
 
+For an AWS deployment, `scripts/deploy.sh` publishes the page and prints the configuration to paste
+(it points at that region's copy, with the region's endpoint already stamped in):
+
 1. Open **System Settings → Add-Ins** and turn on **Allow unverified Add-Ins**.
-2. Click **New Add-In** and paste the contents of [`config.json`](config.json) into **Configuration**.
-   If the add-in is already installed, edit the existing entry instead, because MyGeotab rejects a
-   second add-in with the same name.
+2. Click **New Add-In** and paste the printed JSON into **Configuration**. If the add-in is already
+   installed, edit the existing entry instead, because MyGeotab rejects a second add-in with the same
+   name.
 3. Click **Done**, then **Save**, and refresh the browser.
 
-The add-in reads and writes schedules through the Advantage One scheduling service; point it at a
-deployment by setting `SERVER_API_BASE` near the top of the add-in's `<script>` block (see the
-deployment guide). With that value empty, the add-in falls back to its original behaviour of
-running schedules in the browser while a tab is open.
+To install it without a deployment, use [`config.json`](config.json), which loads the page from
+jsDelivr (the repo's copy is committed pointing at the Canada endpoint). Either way the add-in reads
+and writes schedules through the scheduling service; with `SERVER_API_BASE` near the top of its
+`<script>` block empty, it falls back to its original behaviour of running schedules in the browser
+while a tab is open. See the [deployment guide](docs/aws-deployment-guide.md) for the hosted URLs
+and the bucket setup behind them.
 
 ## Release a new version of the add-in
 
 1. Edit the sources, not the built file: schedule logic lives in `src/core/unassign-core.js`, the
    service client in `src/addin/api-client.js`, and the UI in `unassignDrivers.html`. In that last
    file, check that `SERVER_API_BASE` still points at the deployment you mean — it is baked into the
-   add-in and currently names the Canada endpoint.
+   add-in and currently names the Canada endpoint. (For an AWS deployment this constant is only a
+   default: `scripts/deploy.sh` stamps the region's endpoint into the copy it publishes.)
 2. Run `pnpm test` (this includes a check that the built file matches `src/`) and `pnpm run build:addin`.
 3. Bump `version` in [`config.json`](config.json) and publish a release with a **new** tag that
    matches (for example `v2.0.1`). Never move or reuse a tag: jsDelivr caches each tag permanently.
@@ -55,7 +61,9 @@ scripts/offboard-customer.sh      # disable one, keeping its run history
 ```
 
 Deployment requires only an AWS CLI login and OpenTofu 1.10+; the scripts own every other detail
-(bucket names, state, artifact, outputs). See the [deployment guide](docs/aws-deployment-guide.md).
+(bucket names, state, artifact, outputs, and the add-in upload). A run that changes no infrastructure
+still republishes the add-in page, so add-in fixes ship with the same command. See the
+[deployment guide](docs/aws-deployment-guide.md).
 
 ## Repository map
 

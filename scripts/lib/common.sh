@@ -201,7 +201,7 @@ region_code_from_arg() { # <raw> -> ca|us, non-zero when unknown
   esac
 }
 
-region_field() { # <code> <field> -> value; field: region|country|deployment|state|config|tz
+region_field() { # <code> <field> -> value; field: region|country|deployment|state|config|tz|addin
   case "${1:-}:${2:-}" in
     ca:region)     printf 'ca-central-1\n' ;;
     ca:country)    printf 'Canada\n' ;;
@@ -209,12 +209,14 @@ region_field() { # <code> <field> -> value; field: region|country|deployment|sta
     ca:state)      printf 'advone-ca-central-deploy\n' ;;
     ca:config)     printf 'advone-ca-central-config\n' ;;
     ca:tz)         printf 'America/Toronto\n' ;;
+    ca:addin)      printf 'advone-addin-hosting-ca-central-1\n' ;;
     us:region)     printf 'us-east-2\n' ;;
     us:country)    printf 'United States\n' ;;
     us:deployment) printf 'advone-east-2\n' ;;
     us:state)      printf 'advone-east-2-deploy\n' ;;
     us:config)     printf 'advone-east-2-config\n' ;;
     us:tz)         printf 'America/New_York\n' ;;
+    us:addin)      printf 'advone-addinhosting-us-east-2\n' ;;
     *) return 1 ;;
   esac
 }
@@ -398,6 +400,55 @@ schedule_group_name() { # <database>
 # mistaken for another system's secret in the shared account:
 #   unassign/<database>/serviceaccount
 secret_name_for() { printf 'unassign/%s/serviceaccount\n' "${1:-}"; }
+
+# ---------------------------------------------------------------------------
+# Add-in hosting (pure; exercised by --selftest)
+# ---------------------------------------------------------------------------
+# The page customers' MyGeotab loads. One copy per deployment, filed under this
+# service's prefix in the region's hosting bucket:
+#   s3://<addin bucket>/unassign/unassignDrivers.html
+addin_object_key() { printf 'unassign/unassignDrivers.html\n'; }
+
+# The URL MyGeotab is pointed at. The S3 *website* endpoint answers over plain
+# HTTP only, which an HTTPS MyGeotab page refuses to load, so this is the REST
+# endpoint, kept readable by the bucket policy on /unassign/*.
+addin_object_url() { # <bucket> <region> <key>
+  printf 'https://%s.s3.%s.amazonaws.com/%s\n' "${1:-}" "${2:-}" "${3:-}"
+}
+
+# Lambda publishes its URL with a trailing slash; the add-in joins paths onto it
+# ("/license"), so the slash has to go or every request is //license.
+strip_trailing_slashes() { # <url>
+  local url="${1:-}"
+  while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
+  printf '%s\n' "$url"
+}
+
+# The published page has to name the deployment in the region it is served from,
+# so the endpoint is stamped in at upload time rather than shipped in the repo.
+# Prints the rendered HTML; 2 = bad input, 3 = the page has no endpoint to
+# replace (both mean "do not upload this").
+render_addin_html() { # <html file> <function url> -> HTML on stdout
+  local src="${1:-}" url escaped rendered
+  [ -f "$src" ] || return 2
+  url="$(strip_trailing_slashes "${2:-}")"
+  [ -n "$url" ] || return 2
+  escaped="${url//\\/\\\\}"
+  escaped="${escaped//&/\\&}"
+  escaped="${escaped//|/\\|}"
+  rendered="$(sed -E "s|var SERVER_API_BASE = \"[^\"]*\";|var SERVER_API_BASE = \"${escaped}\";|" "$src")" || return 2
+  printf '%s\n' "$rendered" | grep -qF "var SERVER_API_BASE = \"${url}\";" || return 3
+  printf '%s\n' "$rendered"
+}
+
+# The MyGeotab add-in configuration an operator pastes in, pointing at a
+# published copy of the page (same name, service and version as the repo's).
+addin_config_json() { # <config.json file> <add-in url> -> JSON on stdout
+  local file="${1:-}" url="${2:-}"
+  [ -f "$file" ] || return 2
+  [ -n "$url" ] || return 2
+  jq --arg url "$url" '.items[0].url = $url' "$file"
+}
 
 # ---------------------------------------------------------------------------
 # Pure JSON assembly (no AWS calls; exercised by --selftest)

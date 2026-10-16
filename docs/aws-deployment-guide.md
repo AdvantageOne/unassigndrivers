@@ -81,30 +81,57 @@ The script, in order:
 5. `tofu init` with `infra/backend/<region>.hcl`, then `tofu plan`;
 6. prints a summary of adds / changes / **destroys** and asks for confirmation (`--yes` skips the
    prompt, `--plan-only` stops here);
-7. applies, prints the outputs, and smoke-tests the deployment by invoking `{"action":"health"}`.
+7. applies, prints the outputs, and smoke-tests the deployment by invoking `{"action":"health"}`;
+8. publishes the add-in page to the region's hosting bucket with that region's endpoint stamped in,
+   fetches it back to prove it is readable, and prints the MyGeotab configuration to paste (§4).
 
 Useful flags: `--plan-only`, `--yes`, `--force`, `--destroy` (requires typing the deployment name
 to confirm; `--yes` never skips that), `--selftest` (offline checks of the script's own helpers).
 
-Re-running with nothing changed prints "no changes" and exits 0. Two simultaneous runs are stopped
-by the OpenTofu state lock, not by a double apply.
+Re-running with nothing changed prints "no changes" and skips the apply — but it still publishes the
+add-in page, because the page is not a Terraform resource and a page-only fix (like a UI bug fix)
+ships through this same command. Two simultaneous runs are stopped by the OpenTofu state lock, not
+by a double apply.
 
 ## 4. Point the add-in at the deployment
 
-`SERVER_API_BASE`, at the top of the add-in's `<script>` block, is where the add-in calls. It is
-committed pointing at the **Canada** deployment
-(`https://yfzpzulqadv5r7rkbtbenmphiy0xrdnl.lambda-url.ca-central-1.on.aws`); multi-region routing is
-not decided yet, so every tenant currently talks to that one endpoint. To point a build elsewhere,
-change the constant and re-release the add-in:
+`SERVER_API_BASE`, at the top of the add-in's `<script>` block, is where the add-in calls. You do not
+set it by hand for a deployment: `scripts/deploy.sh` publishes the page to the region's hosting
+bucket with that region's `function_url` stamped in, and prints the configuration to paste:
+
+| Region | Published page |
+|---|---|
+| Canada | `https://advone-addin-hosting-ca-central-1.s3.ca-central-1.amazonaws.com/unassign/unassignDrivers.html` |
+| United States | `https://advone-addinhosting-us-east-2.s3.us-east-2.amazonaws.com/unassign/unassignDrivers.html` |
+
+Each deployment serves its own region's copy, so a database is never pointed at the other region by
+accident. In MyGeotab: **System Settings → Add-Ins → Allow unverified Add-Ins**, then **New Add-In**
+and paste the JSON the deploy printed. If the add-in is already installed, edit that entry instead —
+MyGeotab rejects a second add-in with the same name. MyGeotab keeps its own copy of the page once
+installed, so after a page-changing deploy, update the add-in's URL (or re-paste the config) to pull
+the new copy in.
+
+The buckets are not Terraform resources (they were made by hand and each region has one for all of
+Advantage One's add-ins). The deploy creates a missing one and applies, every run:
+
+- **public read by policy**, scoped to this service's own `unassign/` prefix — object ACLs stay
+  blocked, so a bug here cannot expose another service's objects;
+- **versioning on**, so a bad upload can be rolled back without a redeploy;
+- `Cache-Control: public, max-age=60, must-revalidate` on the page, so a fresh deploy is visible
+  within a minute.
+
+The repo's copy of `unassignDrivers.html` stays committed pointing at **Canada**
+(`https://yfzpzulqadv5r7rkbtbenmphiy0xrdnl.lambda-url.ca-central-1.on.aws`) so it works when opened
+from disk or served from jsDelivr; the deploy replaces that one line per region. To point any other
+build elsewhere, change the constant and re-release:
 
 ```js
 var SERVER_API_BASE = "https://<the function_url output>";
 ```
 
-Then publish the add-in as usual (see the README's release steps). With that value set the add-in
-shows a **Scheduled runs** card, hides the in-browser-only controls (grace window, wake lock), and
-stops running schedules from the browser tab. With it empty, the add-in keeps its original
-in-browser scheduler.
+With that value set the add-in shows a **Scheduled runs** card, hides the in-browser-only controls
+(grace window, wake lock), and stops running schedules from the browser tab. With it empty, the
+add-in keeps its original in-browser scheduler.
 
 The add-in's frame is served from a MyGeotab host, and those hosts are `geotab.com` subdomains, so
 `allowed_origins` defaults to the pattern `"https://*.geotab.com"` — that covers `my.geotab.com`,

@@ -58,7 +58,9 @@ What it does, in order:
   4. builds dist/lambda.zip from src/ (zero runtime dependencies);
   5. tofu init -reconfigure against infra/backend/<ca|us>.hcl, then plan;
   6. prints a summary of what will be added, changed and destroyed;
-  7. applies, prints the outputs and smoke-tests the health action.
+  7. applies, prints the outputs and smoke-tests the health action;
+  8. publishes the add-in page to the region's hosting bucket, stamped with that
+     region's endpoint, and prints the add-in configuration to paste into MyGeotab.
 
 Examples:
   scripts/deploy.sh --region ca
@@ -163,7 +165,48 @@ run_selftest() {
     st_eq "region $code -> deployment name" "$(case $code in ca) echo advone-ca-central ;; us) echo advone-east-2 ;; esac)" "$(region_field "$code" deployment)"
     st_eq "region $code -> state bucket" "$(case $code in ca) echo advone-ca-central-deploy ;; us) echo advone-east-2-deploy ;; esac)" "$(region_field "$code" state)"
     st_eq "region $code -> config bucket" "$(case $code in ca) echo advone-ca-central-config ;; us) echo advone-east-2-config ;; esac)" "$(region_field "$code" config)"
+    st_eq "region $code -> add-in hosting bucket" "$(case $code in ca) echo advone-addin-hosting-ca-central-1 ;; us) echo advone-addinhosting-us-east-2 ;; esac)" "$(region_field "$code" addin)"
   done
+
+  # The add-in page: one object per region, under this service's prefix, and the
+  # endpoint stamped in at upload time so each region names its own deployment.
+  st_eq "the add-in object lives under the service prefix" "unassign/unassignDrivers.html" "$(addin_object_key)"
+  st_eq "the add-in URL is the HTTPS REST endpoint (the website one is HTTP-only)" \
+        "https://advone-addin-hosting-ca-central-1.s3.ca-central-1.amazonaws.com/unassign/unassignDrivers.html" \
+        "$(addin_object_url "$(region_field ca addin)" ca-central-1 "$(addin_object_key)")"
+  st_eq "a trailing slash is stripped from the endpoint" "https://x.lambda-url.ca-central-1.on.aws" \
+        "$(strip_trailing_slashes 'https://x.lambda-url.ca-central-1.on.aws/')"
+  st_eq "an endpoint with no slash is left alone" "https://x.example" "$(strip_trailing_slashes 'https://x.example')"
+  st_eq "an empty endpoint stays empty" "" "$(strip_trailing_slashes '')"
+  local addin_fixture="$PLAN_DIR/selftest-addin.html"
+  printf '%s\n' '<html><script>' '  var SERVER_API_BASE = "https://old.lambda-url.ca-central-1.on.aws";' '</script></html>' > "$addin_fixture"
+  local addin_ca="https://aaa.lambda-url.ca-central-1.on.aws" addin_us="https://bbb.lambda-url.us-east-2.on.aws"
+  st_eq "the page names the endpoint it is published for" "$addin_us" \
+        "$(render_addin_html "$addin_fixture" "$addin_us" | grep -o 'https://bbb[^"]*')"
+  st_true "the page keeps everything else" test "$(render_addin_html "$addin_fixture" "$addin_us" | grep -c '<html><script>')" = "1"
+  # Lambda hands out its URL with a trailing slash; the add-in joins "/license"
+  # onto it, so a second slash must never reach the page.
+  st_eq "a slashed endpoint is published without the double slash" "$addin_ca" \
+        "$(render_addin_html "$addin_fixture" "$addin_ca/" | grep -o 'https://aaa[^"]*')"
+  st_eq "the other region's endpoint is gone" "0" \
+        "$(render_addin_html "$addin_fixture" "$addin_us" | grep -c 'ca-central-1.on.aws' || true)"
+  # Note for anyone adding cases here: a shell function cannot be called from
+  # `bash -c` (it is not exported), and such an assertion passes for the wrong
+  # reason — "command not found" instead of the behaviour under test. Compare
+  # captured output instead, as above.
+  local addin_once="$PLAN_DIR/selftest-addin-once.html"
+  render_addin_html "$addin_fixture" "$addin_ca" > "$addin_once"
+  st_eq "rendering is idempotent" "$(render_addin_html "$addin_fixture" "$addin_ca")" "$(render_addin_html "$addin_once" "$addin_ca")"
+  st_true "the rendered page still ends with a newline" bash -c "tail -c1 '$addin_once' | od -c | grep -q '\\\\n'"
+  st_false "a page with no endpoint to stamp is refused" render_addin_html "$addin_fixture" ""
+  local addin_noendpoint="$PLAN_DIR/selftest-addin-noendpoint.html"
+  printf '%s\n' '<html><script>' '  var SOMETHING_ELSE = 1;' '</script></html>' > "$addin_noendpoint"
+  st_false "a page without a SERVER_API_BASE line is refused" render_addin_html "$addin_noendpoint" "$addin_ca"
+  st_false "a missing add-in file is refused" render_addin_html "$PLAN_DIR/absent.html" "$addin_ca"
+  st_eq "the printed add-in configuration points at the published page" "https://example.test/unassign/unassignDrivers.html" \
+        "$(addin_config_json "$REPO_ROOT/config.json" "https://example.test/unassign/unassignDrivers.html" | jq -r '.items[0].url')"
+  st_eq "the printed add-in configuration keeps the name and version" "$(jq -r '.name' "$REPO_ROOT/config.json")" \
+        "$(addin_config_json "$REPO_ROOT/config.json" "https://example.test/x.html" | jq -r '.name')"
   st_eq "region arg 'ca' maps to code" "ca" "$(region_code_from_arg ca)"
   st_eq "region arg 'us' maps to code" "us" "$(region_code_from_arg us)"
   st_eq "region arg 'ca-central-1' maps to code" "ca" "$(region_code_from_arg ca-central-1)"
@@ -794,6 +837,120 @@ smoke_test() { # <function-name>
   esac
 }
 
+# ---------------------------------------------------------------------------
+# Add-in hosting
+# ---------------------------------------------------------------------------
+# The page customers' MyGeotab loads lives in a bucket of its own, outside the
+# Terraform state (it is a delivery detail of this repo, not an AWS resource the
+# deployment owns — the buckets were made by hand and are shared per region).
+# Terraform knows nothing about it, so this step owns it: create when missing,
+# make it readable, then upload the page with this region's endpoint stamped in.
+addin_bucket_for() { region_field "$REGION_CODE" addin; }
+
+addin_bucket_exists() { # <bucket>: 0 exists, 1 missing, dies on anything else
+  if aws_try s3api head-bucket --bucket "$1" >/dev/null; then
+    return 0
+  fi
+  case "$(aws_last_err)" in
+    *404*|*NoSuchBucket*|*"Not Found"*) return 1 ;;
+    *)
+      die_fix "$(aws_error_reason "$(aws_last_err)") while checking the add-in hosting bucket $1" \
+              "verify with: aws s3api head-bucket --bucket $1 --region $AWS_REGION"
+      ;;
+  esac
+}
+
+create_addin_bucket() { # <bucket>
+  info "creating add-in hosting bucket s3://$1 in $AWS_REGION"
+  must_aws "create s3://$1" \
+           "grant s3:CreateBucket in $AWS_REGION (and check the bucket name is free), then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3api create-bucket --bucket "$1" \
+           --create-bucket-configuration "LocationConstraint=$AWS_REGION"
+}
+
+# Public read of this service's own prefix, granted by policy — ACLs stay
+# blocked. The page is fetched by MyGeotab, so it cannot require credentials.
+configure_addin_bucket() { # <bucket>
+  local bucket="$1" policy
+  policy="$(jq -n --arg bucket "$bucket" '{Version:"2012-10-17", Statement:[{
+    Sid: "ReadTheAddinPage",
+    Effect: "Allow",
+    Principal: "*",
+    Action: "s3:GetObject",
+    Resource: ("arn:aws:s3:::" + $bucket + "/unassign/*")
+  }]}')" || die_fix "could not build the add-in bucket policy" "is jq installed?"
+  must_aws "allow the add-in page to be read" \
+           "grant s3:PutBucketPolicy on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3api put-public-access-block --bucket "$bucket" \
+           --public-access-block-configuration \
+           'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=false,RestrictPublicBuckets=false'
+  must_aws "attach the read policy to s3://$bucket" \
+           "grant s3:PutBucketPolicy on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3api put-bucket-policy --bucket "$bucket" --policy "$policy"
+  # Versions let a bad page be rolled back without a redeploy.
+  if ! aws_try s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled >/dev/null; then
+    warn "could not enable versioning on s3://$bucket: $(aws_error_reason "$(aws_last_err)")"
+  fi
+}
+
+# publish_addin <bucket> <function-url>: uploads the page and proves it is
+# readable from where MyGeotab reads it.
+publish_addin() {
+  local bucket="$1" key page public rc=0 body status content_type url
+  url="$(strip_trailing_slashes "${2:-}")"
+  key="$(addin_object_key)"
+  public="$(addin_object_url "$bucket" "$AWS_REGION" "$key")"
+  if [ -z "$url" ]; then
+    warn "the deployment has no function URL, so the add-in page was not published"
+    hint "the outputs above should carry function_url — check the Lambda resource, then re-run $SCRIPT_NAME --region $REGION_CODE"
+    return 0
+  fi
+
+  addin_bucket_exists "$bucket" || create_addin_bucket "$bucket"
+  configure_addin_bucket "$bucket"
+
+  page="$(mktemp "${TMPDIR:-/tmp}/unassign-addin.XXXXXX")" || die_fix "could not create a temp file" "is TMPDIR writable?"
+  render_addin_html "$REPO_ROOT/unassignDrivers.html" "$url" > "$page" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$page"
+    case "$rc" in
+      2) die_fix "could not read $REPO_ROOT/unassignDrivers.html (or the endpoint was empty)" "is the working tree complete?" ;;
+      *) die_fix "unassignDrivers.html has no 'var SERVER_API_BASE = \"…\";' line to stamp with $url" \
+                 "restore that line in the add-in (it is how the page finds its deployment) and re-run $SCRIPT_NAME --region $REGION_CODE" ;;
+    esac
+  fi
+
+  info "publishing the add-in page for $url"
+  must_aws "upload the add-in page to s3://$bucket/$key" \
+           "grant s3:PutObject on $bucket/unassign/*, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3 cp "$page" "s3://$bucket/$key" \
+           --content-type 'text/html; charset=utf-8' \
+           --cache-control 'public, max-age=60, must-revalidate' \
+           --metadata "deployment=$DEPLOYMENT_NAME" \
+           --region "$AWS_REGION" --only-show-errors
+  rm -f "$page"
+
+  if ! command -v curl >/dev/null 2>&1; then
+    info "smoke test: skipping the add-in page fetch (curl is not installed)"
+    ok "add-in page: $public"
+    return 0
+  fi
+  body="$(curl -sS -m 15 -w '\n%{http_code}|%{content_type}' "$public" 2>/dev/null || true)"
+  status="$(printf '%s' "$body" | tail -1 | cut -d'|' -f1)"
+  content_type="$(printf '%s' "$body" | tail -1 | cut -d'|' -f2)"
+  if [ "$status" != "200" ]; then
+    warn "the add-in page is not readable at $public (HTTP ${status:-none})"
+    hint "public read comes from the bucket policy on /unassign/* — check: aws s3api get-bucket-policy --bucket $bucket --region $AWS_REGION"
+    return 0
+  fi
+  if printf '%s' "$body" | grep -qF "$url"; then
+    ok "add-in page live: $public (HTTP 200, $content_type, names $url)"
+  else
+    warn "the published page does not name $url"
+    hint "it may be a cached copy: re-run $SCRIPT_NAME --region $REGION_CODE, then check with curl -s $public | grep SERVER_API_BASE"
+  fi
+}
+
 cleanup() {
   aws_err_cleanup
   if [ -n "$PLAN_DIR" ] && [ -d "$PLAN_DIR" ]; then
@@ -841,13 +998,16 @@ tofu_init
 run_plan
 print_plan_summary
 
+PLAN_EMPTY=0
 if [ "$((PLAN_ADDS + PLAN_CHANGES + PLAN_DESTROYS + PLAN_REPLACES))" -eq 0 ]; then
   if [ "$DESTROY" -eq 1 ]; then
     ok "Nothing to destroy: $DEPLOYMENT_NAME has no managed resources left."
-  else
-    ok "No changes: $DEPLOYMENT_NAME in $AWS_REGION is already up to date (state and config in s3://$STATE_BUCKET)."
+    exit 0
   fi
-  exit 0
+  ok "No changes: $DEPLOYMENT_NAME in $AWS_REGION is already up to date (state and config in s3://$STATE_BUCKET)."
+  # The add-in page lives outside Terraform and is published on every run, so a
+  # no-change deploy still refreshes it: that is how a page-only fix ships.
+  PLAN_EMPTY=1
 fi
 
 if [ "$PLAN_ONLY" -eq 1 ]; then
@@ -864,26 +1024,29 @@ if [ "$DESTROY" -eq 1 ]; then
   if ! prompt_typed "This DESTROYS $PLAN_DESTROYS resource(s) (and replaces $PLAN_REPLACES) of the $DEPLOYMENT_NAME deployment in $AWS_REGION: the config bucket, the Lambda function and its URL, the IAM roles, the DLQ, the log group and the alarms. The state bucket s3://$STATE_BUCKET is kept." "$DEPLOYMENT_NAME"; then
     die_fix "destroy cancelled: the typed name did not match '$DEPLOYMENT_NAME'" "re-run $SCRIPT_NAME --region $REGION_CODE --destroy and type the deployment name exactly as shown"
   fi
-else
-  if [ "$ASSUME_YES" -eq 0 ]; then
-    if ! prompt_yes_no "Apply this plan to $DEPLOYMENT_NAME ($AWS_REGION)?" n; then
-      die_fix "deploy aborted at the confirmation prompt — nothing was applied" "re-run $SCRIPT_NAME --region $REGION_CODE when you are ready, or pass --yes to skip the prompt"
-    fi
-  else
-    info "--yes: applying without asking"
+elif [ "$PLAN_EMPTY" -eq 1 ]; then
+  info "nothing to apply: the infrastructure already matches the configuration"
+elif [ "$ASSUME_YES" -eq 0 ]; then
+  if ! prompt_yes_no "Apply this plan to $DEPLOYMENT_NAME ($AWS_REGION)?" n; then
+    die_fix "deploy aborted at the confirmation prompt — nothing was applied" "re-run $SCRIPT_NAME --region $REGION_CODE when you are ready, or pass --yes to skip the prompt"
   fi
+else
+  info "--yes: applying without asking"
 fi
 
-step "Apply"
-rc=0
-tofu -chdir="$TF_DIR" apply -input=false "$PLAN_PATH" || rc=$?
-if [ "$rc" -ne 0 ]; then
-  die_fix "tofu apply failed in $TF_DIR — the deployment is only partly applied" "read the error above, fix it, then re-run $SCRIPT_NAME --region $REGION_CODE: a re-run plans the remainder and applies nothing twice"
+if [ "$PLAN_EMPTY" -eq 0 ]; then
+  step "Apply"
+  rc=0
+  tofu -chdir="$TF_DIR" apply -input=false "$PLAN_PATH" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    die_fix "tofu apply failed in $TF_DIR — the deployment is only partly applied" "read the error above, fix it, then re-run $SCRIPT_NAME --region $REGION_CODE: a re-run plans the remainder and applies nothing twice"
+  fi
 fi
 
 if [ "$DESTROY" -eq 1 ]; then
   ok "destroyed $DEPLOYMENT_NAME. The state bucket s3://$STATE_BUCKET and its deployment marker were left in place on purpose."
   info "to remove the state bucket itself (types the bucket name): aws s3 rb s3://$STATE_BUCKET --force --region $AWS_REGION"
+  info "the published add-in page was left in place (it is not a Terraform resource); MyGeotab would call an endpoint that no longer exists. To remove it: aws s3 rm s3://$(addin_bucket_for)/$(addin_object_key) --region $AWS_REGION"
   exit 0
 fi
 
@@ -893,12 +1056,23 @@ FN_NAME="$(output_value function_name "$OUTS")"
 smoke_test "$FN_NAME"
 smoke_test_cors "$FN_NAME" "$(output_value function_url "$OUTS")"
 
+ADDIN_BUCKET="$(addin_bucket_for)"
+ADDIN_URL="$(addin_object_url "$ADDIN_BUCKET" "$AWS_REGION" "$(addin_object_key)")"
+step "Add-in page"
+publish_addin "$ADDIN_BUCKET" "$(output_value function_url "$OUTS")"
+
 step "Next steps"
 printf '%s\n' "  endpoint    : $(output_value function_url "$OUTS")"
 printf '%s\n' "  config      : s3://$(output_value config_bucket "$OUTS")/$(output_value config_key "$OUTS")"
 printf '%s\n' "  group prefix: $(output_value schedule_group_prefix "$OUTS")"
 printf '%s\n' "  alarms      : $(output_value alarm_topic_arn "$OUTS")"
 printf '%s\n' "  dlq         : $(output_value dlq_url "$OUTS")"
+printf '%s\n' "  add-in page : $ADDIN_URL"
+printf '\n'
+printf '%s\n' "In MyGeotab: System Settings -> Add-Ins -> Allow unverified Add-Ins, then New Add-In and"
+printf '%s\n' "paste this as the configuration (or replace the existing entry for this add-in):"
+printf '\n'
+addin_config_json "$REPO_ROOT/config.json" "$ADDIN_URL" || warn "could not read config.json for the add-in configuration"
 printf '\n'
 printf '%s\n' "Onboard a customer:  scripts/onboard-customer.sh --region $REGION_CODE"
 ok "$DEPLOYMENT_NAME deployed in $AWS_REGION (account $AWS_ACCOUNT_ID)."
