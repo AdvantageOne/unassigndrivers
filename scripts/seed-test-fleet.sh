@@ -34,6 +34,11 @@ SELFTEST=0
 
 SEED_PREFIX_BASE="A1SEED"
 ADMIN_GROUP_ID="GroupEverythingSecurityId"
+# MyGeotab's built-in root group, the same id src/core/unassign-core.js uses for
+# its AddInData writes. A driver or an asset has to belong to a group: a bare
+# `Add User` is refused with "-32000: User's CompanyGroups cannot be null or
+# empty", so every record this script creates is put in the Company group.
+COMPANY_GROUP_ID="GroupCompanyId"
 
 usage() {
   cat <<'USAGE'
@@ -126,14 +131,18 @@ seed_count() { # <text>
   printf '%s\n' "${1:-}" | grep -c . || true
 }
 
-# A driver is a User with isDriver set; only fields MyGeotab needs are sent.
-seed_user_json() { # <name> <index>
-  jq -n --arg name "${1:-}" --arg index "${2:-}" \
-    '{name: $name, firstName: "Test", lastName: ("Driver " + $index), isDriver: true}'
+# A driver is a User with isDriver set; only fields MyGeotab needs are sent, and
+# companyGroups is one of them (a driver with no group cannot be created).
+seed_user_json() { # <name> <index> <group id>
+  jq -n --arg name "${1:-}" --arg index "${2:-}" --arg group "${3:-}" \
+    '{name: $name, firstName: "Test", lastName: ("Driver " + $index), isDriver: true,
+      companyGroups: [{id: $group}]}'
 }
 
-seed_device_json() { # <name> <serial>
-  jq -n --arg name "${1:-}" --arg serial "${2:-}" '{name: $name, serialNumber: $serial}'
+# The same for an asset: Device.groups, or MyGeotab has nowhere to file it.
+seed_device_json() { # <name> <serial> <group id>
+  jq -n --arg name "${1:-}" --arg serial "${2:-}" --arg group "${3:-}" \
+    '{name: $name, serialNumber: $serial, groups: [{id: $group}]}'
 }
 
 # The assignment itself — the same entity the service writes to clear a fleet,
@@ -341,7 +350,7 @@ add_users() { # -> ids on stdout, one per line
   local i name id
   for ((i = 1; i <= COUNT; i++)); do
     name="$(seed_name "$BATCH" Driver "$i")"
-    id="$(add_one "User" "$(seed_user_json "$name" "$i")" "driver $name")" || return 1
+    id="$(add_one "User" "$(seed_user_json "$name" "$i" "$COMPANY_GROUP_ID")" "driver $name")" || return 1
     printf '%s\n' "$id"
   done
 }
@@ -350,7 +359,7 @@ add_devices() { # -> ids on stdout, one per line
   local i name id
   for ((i = 1; i <= COUNT; i++)); do
     name="$(seed_name "$BATCH" Asset "$i")"
-    id="$(add_one "Device" "$(seed_device_json "$name" "$(seed_serial "$BATCH" "$i")")" "asset $name")" || return 1
+    id="$(add_one "Device" "$(seed_device_json "$name" "$(seed_serial "$BATCH" "$i")" "$COMPANY_GROUP_ID")" "asset $name")" || return 1
     printf '%s\n' "$id"
   done
 }
@@ -473,14 +482,18 @@ run_selftest() {
   st_eq "counting nothing is zero, not an error" "0" "$(seed_count "")"
 
   local user device change search
-  user="$(seed_user_json "A1SEED-x-Driver-01" 1)"
+  user="$(seed_user_json "A1SEED-x-Driver-01" 1 "GroupCompanyId")"
   st_eq "driver name" "A1SEED-x-Driver-01" "$(printf '%s' "$user" | jq -r .name)"
   st_eq "a driver is a User with isDriver" "true" "$(printf '%s' "$user" | jq -r .isDriver)"
-  st_eq "driver fields are the three MyGeotab needs" "firstName isDriver lastName name" \
+  st_eq "driver fields are what MyGeotab needs" "companyGroups firstName isDriver lastName name" \
         "$(printf '%s' "$user" | jq -r 'keys | join(" ")')"
-  device="$(seed_device_json "A1SEED-x-Asset-01" "A1SEED-x-SN-01")"
+  # Without this the API refuses the Add: "User's CompanyGroups cannot be null or empty".
+  st_eq "the driver belongs to the company group" "GroupCompanyId" \
+        "$(printf '%s' "$user" | jq -r '.companyGroups[0].id')"
+  device="$(seed_device_json "A1SEED-x-Asset-01" "A1SEED-x-SN-01" "GroupCompanyId")"
   st_eq "device name" "A1SEED-x-Asset-01" "$(printf '%s' "$device" | jq -r .name)"
   st_eq "device serial number" "A1SEED-x-SN-01" "$(printf '%s' "$device" | jq -r .serialNumber)"
+  st_eq "the asset belongs to the company group" "GroupCompanyId" "$(printf '%s' "$device" | jq -r '.groups[0].id')"
   change="$(seed_driverchange_json "b1" "b2" "2026-10-16T13:30:00.000Z")"
   st_eq "an assignment is a DriverChange for the device" "b1" "$(printf '%s' "$change" | jq -r .device.id)"
   st_eq "an assignment names the driver" "b2" "$(printf '%s' "$change" | jq -r .driver.id)"
