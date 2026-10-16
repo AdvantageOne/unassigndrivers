@@ -4,7 +4,7 @@
 #
 # Brief §7 Step 9: collect the tenant details, prove the Geotab service-account
 # credentials with a live Authenticate BEFORE any AWS write, then create/update
-# the secret unassign/<database> and register the customer in
+# the secret unassign/<database>/serviceaccount and register the customer in
 # s3://<config-bucket>/config/customers.json with a conditional (If-Match)
 # read-modify-write so two operators onboarding at once cannot clobber each other.
 #
@@ -53,7 +53,7 @@ least 16 characters — type "g" to generate a 32-character one), time zone
 It then (unless --dry-run):
   1. proves the credentials with a live POST to https://<server>/apiv1
      (Authenticate) — a failure exits non-zero with nothing written;
-  2. creates or updates the secret unassign/<database>;
+  2. creates or updates the secret unassign/<database>/serviceaccount;
   3. read-modify-writes s3://<config-bucket>/config/customers.json, retrying if
      another operator changed it first.
 
@@ -131,7 +131,7 @@ long_db="$(printf 'd%.0s' {1..65})"
   st_eq "entry licenses the database" "true" "$(printf '%s' "$entry" | jq -r .license.licensed)"
   st_eq "entry records who licensed it" "onboard-script" "$(printf '%s' "$entry" | jq -r .license.source)"
   st_eq "entry records the worker user name" "svc-unassign@advone.io" "$(printf '%s' "$entry" | jq -r .workerUserName)"
-  st_eq "entry secretName" "unassign/simplot_prod" "$(printf '%s' "$entry" | jq -r .secretName)"
+  st_eq "entry secretName" "unassign/simplot_prod/serviceaccount" "$(printf '%s' "$entry" | jq -r .secretName)"
   st_eq "entry geotab.database" "simplot_prod" "$(printf '%s' "$entry" | jq -r .geotab.database)"
   st_true "entry enabled is a boolean true" test "$(printf '%s' "$entry" | jq -r '.enabled | type')" = "boolean"
   st_eq "entry notes" "pilot tenant" "$(printf '%s' "$entry" | jq -r .notes)"
@@ -150,7 +150,7 @@ long_db="$(printf 'd%.0s' {1..65})"
   "defaults": {"skipDriving": true, "graceMinutes": 60},
   "customers": {
     "other_db": {"key": "other_db", "geotab": {"database": "other_db", "server": "my.geotab.com"},
-                 "secretName": "unassign/other_db", "enabled": true, "timeZone": "America/Toronto",
+                 "secretName": "unassign/other_db/serviceaccount", "enabled": true, "timeZone": "America/Toronto",
                  "createdAt": "2026-01-01T00:00:00Z", "createdBy": "arn:aws:iam::1:user/ops", "notes": ""}
   }
 }

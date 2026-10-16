@@ -26,8 +26,7 @@ const licensing = require("../lib/licensing");
 const naming = require("../lib/naming");
 const { normaliseServer } = require("../lib/geotab");
 
-const SECRET_PREFIX = "unassign/";
-const MESSAGE_UNLICENSED = "This database is not licensed. Please contact your CSR to enabled your license.";
+const MESSAGE_UNLICENSED = "This database is not licensed. Please contact your CSR to enable your license.";
 const MAX_NOTES = 500;
 
 function requireString(payload, field, label) {
@@ -107,7 +106,7 @@ async function saveWorkerCredentials(context, payload) {
     throw appError("BAD_REQUEST", `MyGeotab rejected those credentials: ${error.message}`);
   }
 
-  const secretName = `${SECRET_PREFIX}${database}`;
+  const secretName = naming.secretName(database);
   const secret = await context.secretPublisher.put(secretName, {
     database,
     server,
@@ -187,5 +186,4 @@ module.exports = {
   saveWorkerCredentials,
   assertLicensed,
   MESSAGE_UNLICENSED,
-  SECRET_PREFIX
 };

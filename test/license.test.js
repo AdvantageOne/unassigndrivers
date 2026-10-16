@@ -17,7 +17,7 @@ const { createFakeConfig, createFakeGeotab, clone } = require("./support/fakes")
 
 test("the unlicensed sentence is the same in the service, the client and the add-in", () => {
   const sentence = apiClient.ERROR_TEXT.LICENSE_REQUIRED;
-  assert.equal(sentence, "Please contact your CSR to enabled your license");
+  assert.equal(sentence, "Please contact your CSR to enable your license");
   assert.ok(license.MESSAGE_UNLICENSED.includes(sentence), "the service message must carry the sentence");
   const html = readFileSync(join(__dirname, "..", "unassignDrivers.html"), "utf8");
   assert.ok(html.includes(sentence), "the add-in's modal must show the same sentence");
@@ -180,7 +180,7 @@ test("saveWorkerCredentials verifies, stores the secret and adds the config reco
 
   assert.deepEqual(result, {
     database: "brand_new",
-    secretName: "unassign/brand_new",
+    secretName: "unassign/brand_new/serviceaccount",
     secretCreated: true,
     configUpdated: true,
     verified: true,
@@ -198,7 +198,7 @@ test("saveWorkerCredentials verifies, stores the secret and adds the config reco
   });
 
   const record = ctx.stored().customers.brand_new;
-  assert.equal(record.secretName, "unassign/brand_new");
+  assert.equal(record.secretName, "unassign/brand_new/serviceaccount");
   assert.equal(record.enabled, true);
   assert.equal(record.workerUserName, "svc-unassign@customer.com");
   assert.equal(record.license.licensed, true);
@@ -212,7 +212,7 @@ test("saveWorkerCredentials verifies, stores the secret and adds the config reco
 
 test("saveWorkerCredentials updates an existing record in place", async () => {
   const ctx = context({ session: { userName: STAFF } });
-  ctx.secrets.push({ name: "unassign/tenant_a", payload: { userName: "old-svc" } }); // the secret already exists
+  ctx.secrets.push({ name: "unassign/tenant_a/serviceaccount", payload: { userName: "old-svc" } }); // the secret already exists
   const before = ctx.stored().customers.tenant_a;
 
   const result = await license.saveWorkerCredentials(ctx, {

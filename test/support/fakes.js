@@ -292,7 +292,7 @@ const DEFAULT_CONFIG = {
     tenant_a: {
       key: "tenant_a",
       geotab: { database: "tenant_a", server: "my.geotab.com" },
-      secretName: "unassign/tenant_a",
+      secretName: "unassign/tenant_a/serviceaccount",
       enabled: true,
       timeZone: "America/Toronto",
       workerUserName: "svc-unassign@example.com",

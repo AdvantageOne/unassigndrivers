@@ -134,7 +134,7 @@ Non-findings worth stating so nobody "fixes" them during the port: the per-devic
 | D3 | Cadence | Every 5 minutes, flexible time window off | Scheduler is precise and cheap; keeps the ≤ grace-window guarantee with margin. Leaves tenant grace guidance at 60 min initially (D8) |
 | D4 | IaC tool | OpenTofu (Terraform-compatible) | Team already reviews Terraform/OpenTofu; SAM/CDK would add a second toolchain for one function |
 | D5 | Runtime | `nodejs22.x`, `arm64`, 256 MB, timeout 300 s | Code needs global `fetch` (Node ≥18) and full-ICU `Intl` for IANA zones. No bundle → no lockfile needed beyond tests |
-| D6 | Secrets layout | One Secrets Manager secret per database (`unassign/<database>`), JSON `{database, userName, password, server}` | Per-tenant isolation and rotation; IAM grants one prefix. Migration = split today's array |
+| D6 | Secrets layout | One Secrets Manager secret per database (`unassign/<database>/serviceaccount`), JSON `{database, userName, password, server}` | Per-tenant isolation and rotation; IAM grants one prefix. Migration = split today's array |
 | D7 | "By" label in run history | Keep `Unassign Service` (current `RUNNER_NAME`) | The add-in's `byLabel()` only rewrites `/^GitHub Actions/`; a new label needs an add-in release. Keep history rendering identical |
 | D8 | Tenant schedule data | Do not touch stored records | No migration; grace stays whatever each tenant set. Docs may advise 15–60 min after cutover |
 | D9 | `check` mode | Keep, as an event field `{"mode":"check"}`; **default `run-if-due`** | Preserves the current dispatch behavior and keeps a safe smoke path |

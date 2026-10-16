@@ -84,10 +84,10 @@ test("buildDeps wires every adapter to the option name its module reads", async 
   // 1. the config store reads through the loader it was given
   const loaded = await deps.configStore.get();
   assert.equal(loaded.customers.tenant_a.key, "tenant_a");
-  assert.equal((await deps.configStore.getCustomer("tenant_a")).customer.secretName, "unassign/tenant_a");
+  assert.equal((await deps.configStore.getCustomer("tenant_a")).customer.secretName, "unassign/tenant_a/serviceaccount");
 
   // 2. the secret store reads through its fetcher
-  assert.equal((await deps.secretStore.get("unassign/tenant_a", "tenant_a")).userName, "svc-unassign");
+  assert.equal((await deps.secretStore.get("unassign/tenant_a/serviceaccount", "tenant_a")).userName, "svc-unassign");
 
   // 3. the config writer reads and writes through its adapter
   const written = await deps.configWriter.mutate((current) => {

@@ -17,6 +17,20 @@ const PLAN = {
   timeZone: "America/New_York"
 };
 
+test("secretName files each database's service account under the service prefix", () => {
+  assert.equal(naming.secretName("jorn"), "unassign/jorn/serviceaccount");
+  assert.equal(naming.secretName("advone_matt_dev1"), "unassign/advone_matt_dev1/serviceaccount");
+  assert.equal(naming.secretName(" Simplot_Prod "), "unassign/Simplot_Prod/serviceaccount", "trimmed, casing kept");
+  assert.equal(naming.SECRET_PREFIX, "unassign/");
+
+  // The segment is checked, not rewritten: it is the identity MyGeotab, the S3
+  // record and the schedules all share, and it must not be able to escape its
+  // prefix or read as some other system's secret.
+  for (const bad of ["", "   ", null, undefined, "../escape", "has/slash", "-leading", "a b", "é"]) {
+    assert.throws(() => naming.secretName(bad), /cannot be used in a secret name/, `rejects ${JSON.stringify(bad)}`);
+  }
+});
+
 test("dbPrefix produces a legal, stable group segment", () => {
   assert.equal(naming.dbPrefix("Simplot_Prod"), "simplot_prod");
   assert.equal(naming.dbPrefix("Tenant A / Prod!"), "tenant-a-prod");

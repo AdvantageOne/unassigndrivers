@@ -588,7 +588,7 @@ test("license shows a tenant why they cannot use the service", async () => {
 
   assert.equal(payload.data.staff, false);
   assert.equal(payload.data.licensed, false);
-  assert.match(payload.data.message, /Please contact your CSR to enabled your license/);
+  assert.match(payload.data.message, /Please contact your CSR to enable your license/);
 });
 
 test("a tenant cannot call the staff-only setup", async () => {
@@ -624,7 +624,7 @@ test("staff setup stores the secret and licenses the database", async () => {
   assert.equal(payload.data.licensed, true);
   assert.equal(payload.data.secretCreated, true, "the fake secret store starts empty");
   assert.equal(secretPublisher.secrets.length, 1);
-  assert.equal(secretPublisher.secrets[0].name, "unassign/tenant_a");
+  assert.equal(secretPublisher.secrets[0].name, "unassign/tenant_a/serviceaccount");
   assert.equal(configWriter.writes.length, 1);
   const record = configWriter.stored().customers.tenant_a;
   assert.equal(record.license.source, "addin-panel");

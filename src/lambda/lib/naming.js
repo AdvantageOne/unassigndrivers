@@ -36,6 +36,30 @@ function assertValidName(name, what) {
   return name;
 }
 
+/*
+ * Secrets live in an account shared with every other Advantage One system, so
+ * each one is filed under the service that owns it. One secret per database,
+ * holding that database's service account:
+ *   unassign/<database>/serviceaccount
+ */
+const SECRET_PREFIX = "unassign/";
+const SERVICE_ACCOUNT_SECRET = "serviceaccount";
+const SECRET_SEGMENT_PATTERN = /^[0-9A-Za-z][0-9A-Za-z_.-]{0,127}$/;
+
+/**
+ * The Secrets Manager name for a database's service account. The database
+ * segment is used verbatim — it is the identity the config, the schedules and
+ * MyGeotab all share — but it is checked, so a name can never escape its
+ * prefix or read as some other system's secret.
+ */
+function secretName(database) {
+  const name = String(database == null ? "" : database).trim();
+  if (!SECRET_SEGMENT_PATTERN.test(name) || name.includes("..")) {
+    throw appError("BAD_REQUEST", `Database name "${database}" cannot be used in a secret name.`);
+  }
+  return `${SECRET_PREFIX}${name}/${SERVICE_ACCOUNT_SECRET}`;
+}
+
 function sanitiseSegment(value) {
   return String(value || "")
     .toLowerCase()
@@ -163,6 +187,9 @@ module.exports = {
   NAME_MAX_LENGTH,
   NAME_PATTERN,
   DAY_NAMES,
+  SECRET_PREFIX,
+  SERVICE_ACCOUNT_SECRET,
+  secretName,
   hash8,
   dbPrefix,
   scopeKey,

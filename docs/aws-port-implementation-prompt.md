@@ -289,7 +289,7 @@ equivalent to Scheduler rights, and keep them scoped to the Scheduler execution 
 - The Lambda reads this object on every request (or caches for ≤ 60 s); a config change takes effect without a deploy.
 - Never store a password here. Only the secret reference.
 
-### 5.7 Secret (`unassign/<database>`, JSON, same field names as the legacy `GEOTAB_ACCOUNTS` entry)
+### 5.7 Secret (`unassign/<database>/serviceaccount`, JSON, same field names as the legacy `GEOTAB_ACCOUNTS` entry)
 
 ```json
 { "database": "simplot_prod", "server": "my.geotab.com",
@@ -515,7 +515,7 @@ OpenTofu, one root per region, same module, variables only:
   enforced or generated and shown once), timezone (default from the deployment), optional notes.
 - Verifies credentials with a live `Authenticate` (and a `Get User` for the account) **before**
   writing anything; on failure, exit non-zero with no side effects.
-- Creates/updates the Secrets Manager secret `unassign/<database>`; updates
+- Creates/updates the Secrets Manager secret `unassign/<database>/serviceaccount`; updates
   `config/customers.json` with a read-modify-write using S3 conditional put (`If-Match` on the
   ETag) and retries on conflict, so two operators onboarding simultaneously cannot clobber each
   other.

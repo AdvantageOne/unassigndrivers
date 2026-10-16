@@ -35,7 +35,7 @@ Usage:
 Options:
   --region ca|us    Which deployment the tenant lives in: Canada (ca-central-1)
                     or United States (us-east-2). Asked interactively when omitted.
-  --delete-secret   Also delete the Secrets Manager secret unassign/<database>
+  --delete-secret   Also delete the Secrets Manager secret unassign/<database>/serviceaccount
                     (30-day recovery window; recovery is reversible).
   --yes, -y         Answer "yes" to every confirmation prompt.
   --selftest        Run the offline self-tests for the script's pure helpers.
@@ -93,7 +93,7 @@ run_selftest() {
   st_eq "region arg 'united-states' maps to code" "us" "$(region_code_from_arg united-states)"
   st_false "region 'mars' is rejected" region_code_from_arg mars
 
-  st_eq "secret name pattern" "unassign/simplot_prod" "$(secret_name_for "simplot_prod")"
+  st_eq "secret name pattern" "unassign/simplot_prod/serviceaccount" "$(secret_name_for "simplot_prod")"
   st_eq "tenant schedule group for a mixed-case database" \
     "UnassignDriverSchedules-simplot_prod" "$(schedule_group_name "Simplot_Prod")"
   long_db="$(printf 'd%.0s' {1..64})"
@@ -108,11 +108,11 @@ run_selftest() {
   "addIn": {"securityId": {"id": "acP6yyGZ42EmhgOePJfLP7w", "name": "ViewSecurityId"}},
   "customers": {
     "simplot_prod": {"key": "simplot_prod", "geotab": {"database": "simplot_prod", "server": "my.geotab.com"},
-                     "secretName": "unassign/simplot_prod", "enabled": true, "timeZone": "America/New_York",
+                     "secretName": "unassign/simplot_prod/serviceaccount", "enabled": true, "timeZone": "America/New_York",
                      "createdAt": "2026-10-15T00:00:00Z", "createdBy": "arn:aws:iam::1:user/ops",
                      "notes": "pilot tenant"},
     "other_db": {"key": "other_db", "geotab": {"database": "other_db", "server": "my.geotab.com"},
-                 "secretName": "unassign/other_db", "enabled": true, "timeZone": "America/Toronto",
+                 "secretName": "unassign/other_db/serviceaccount", "enabled": true, "timeZone": "America/Toronto",
                  "createdAt": "2026-01-01T00:00:00Z", "createdBy": "arn:aws:iam::1:user/ops", "notes": ""}
   }
 }
@@ -127,7 +127,7 @@ JSON
   st_eq "disable keeps the entry (history survives)" "simplot_prod" "$(printf '%s' "$merged" | jq -r '.customers.simplot_prod.key')"
   st_eq "disable keeps createdAt" "2026-10-15T00:00:00Z" "$(printf '%s' "$merged" | jq -r '.customers.simplot_prod.createdAt')"
   st_eq "disable keeps notes" "pilot tenant" "$(printf '%s' "$merged" | jq -r '.customers.simplot_prod.notes')"
-  st_eq "disable keeps the secret reference" "unassign/simplot_prod" "$(printf '%s' "$merged" | jq -r '.customers.simplot_prod.secretName')"
+  st_eq "disable keeps the secret reference" "unassign/simplot_prod/serviceaccount" "$(printf '%s' "$merged" | jq -r '.customers.simplot_prod.secretName')"
   st_eq "disable leaves other tenants alone" "true" "$(printf '%s' "$merged" | jq -r '.customers.other_db.enabled')"
   st_eq "disable keeps the addIn block" "acP6yyGZ42EmhgOePJfLP7w" "$(printf '%s' "$merged" | jq -r '.addIn.securityId.id')"
   st_eq "disable is idempotent" "false" "$(merge_disable_customer "$tmp/disabled.json" "$tmp/disabled2.json" "simplot_prod" && jq -r '.customers.simplot_prod.enabled' "$tmp/disabled2.json")"

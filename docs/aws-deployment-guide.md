@@ -140,7 +140,7 @@ It asks for the Geotab database, server (default `my.geotab.com`), service-accou
 password (or offers to generate a 32-character one), time zone (default per deployment: Toronto for
 Canada, New York for United States) and optional notes. Before writing anything it signs in to
 MyGeotab with those credentials; a wrong password exits with no side effects. It then creates or
-updates the secret `unassign/<database>` and merges the customer into the S3 config with a
+updates the secret `unassign/<database>/serviceaccount` and merges the customer into the S3 config with a
 conditional write, so two operators onboarding at the same time cannot clobber each other.
 
 The service account must be a dedicated MyGeotab user with Administrator clearance and Company
@@ -170,7 +170,7 @@ your license"*. Two ways to license a database:
 A staff member opening the add-in in a database with no worker configured sees a **Service account
 setup** card (it needs only a proven session and a staff domain, not the add-in's Geotab clearance,
 so staff can register databases before `addIn.securityId.id` is configured): MyGeotab user name, password, server, and a "License this database" checkbox. Saving it
-verifies the credentials against MyGeotab first, then writes the secret `unassign/<database>`, then
+verifies the credentials against MyGeotab first, then writes the secret `unassign/<database>/serviceaccount`, then
 adds or updates the record — `enabled: true`, `workerUserName` (display only, never a credential),
 `timeZone` and the license block. A credential that MyGeotab rejects is reported and nothing is
 written. The password exists only in that request and in Secrets Manager: never in the config, never

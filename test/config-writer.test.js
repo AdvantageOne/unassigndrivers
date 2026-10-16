@@ -74,7 +74,7 @@ test("a competing write is not lost: the loser re-reads and re-applies", async (
       if (!competed) {
         competed = true;
         s3.compete((config) => {
-          config.customers.other_tenant = { key: "other_tenant", geotab: { database: "other_tenant" }, secretName: "unassign/other_tenant", enabled: true };
+          config.customers.other_tenant = { key: "other_tenant", geotab: { database: "other_tenant" }, secretName: "unassign/other_tenant/serviceaccount", enabled: true };
         });
       }
       return s3.write(text, etag);

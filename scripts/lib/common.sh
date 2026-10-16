@@ -394,7 +394,10 @@ schedule_group_name() { # <database>
   printf '%s' "$name"
 }
 
-secret_name_for() { printf 'unassign/%s\n' "${1:-}"; }
+# One secret per database, filed under this service's own prefix so it is never
+# mistaken for another system's secret in the shared account:
+#   unassign/<database>/serviceaccount
+secret_name_for() { printf 'unassign/%s/serviceaccount\n' "${1:-}"; }
 
 # ---------------------------------------------------------------------------
 # Pure JSON assembly (no AWS calls; exercised by --selftest)
@@ -415,7 +418,7 @@ customer_entry_json() { # <database> <server> <timeZone> <createdBy> <notes> [cr
         --arg notes "$notes" --arg createdAt "$createdAt" --arg worker "$worker" \
     '{key: $key,
       geotab: { database: $key, server: $server },
-      secretName: ("unassign/" + $key),
+      secretName: ("unassign/" + $key + "/serviceaccount"),
       enabled: true,
       timeZone: $tz,
       workerUserName: $worker,

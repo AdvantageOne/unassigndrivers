@@ -149,7 +149,7 @@ test("textFor prefers the documented copy and falls back to the message", () => 
   assert.equal(api.textFor({ code: "LICENSE_REQUIRED" }), api.ERROR_TEXT.LICENSE_REQUIRED);
   assert.equal(api.textFor({ code: "NOT_A_CODE", message: "raw detail" }), "raw detail");
   assert.equal(api.textFor(null), api.ERROR_TEXT.INTERNAL);
-  assert.equal(api.ERROR_TEXT.LICENSE_REQUIRED, "Please contact your CSR to enabled your license");
+  assert.equal(api.ERROR_TEXT.LICENSE_REQUIRED, "Please contact your CSR to enable your license");
 });
 
 test("every code the service can return has friendly text", () => {

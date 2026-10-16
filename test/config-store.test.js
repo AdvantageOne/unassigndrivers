@@ -13,7 +13,7 @@ const { createFakeConfig } = require("./support/fakes");
 
 test("parseConfig accepts the documented shape", () => {
   const config = createFakeConfig({});
-  assert.equal(parseConfig(JSON.stringify(config)).customers.tenant_a.secretName, "unassign/tenant_a");
+  assert.equal(parseConfig(JSON.stringify(config)).customers.tenant_a.secretName, "unassign/tenant_a/serviceaccount");
 });
 
 test("parseConfig rejects invalid JSON and structural breakage", () => {
@@ -40,7 +40,7 @@ test("parseConfig rejects invalid JSON and structural breakage", () => {
 test("getCustomer reports unknown and disabled tenants distinctly", async () => {
   const store = createConfigStore({ load: async () => JSON.stringify(createFakeConfig({})), ttlMs: 0 });
   const found = await store.getCustomer("tenant_a");
-  assert.equal(found.customer.secretName, "unassign/tenant_a");
+  assert.equal(found.customer.secretName, "unassign/tenant_a/serviceaccount");
 
   await assert.rejects(() => store.getCustomer("nope"), (error) => error.code === "DATABASE_NOT_ONBOARDED");
   await assert.rejects(() => store.getCustomer(), (error) => error.code === "BAD_REQUEST");
@@ -104,16 +104,16 @@ test("secrets are cached per name and can be invalidated", async () => {
     now: () => clock
   });
 
-  await store.get("unassign/tenant_a", "tenant_a");
-  await store.get("unassign/tenant_a", "tenant_a");
+  await store.get("unassign/tenant_a/serviceaccount", "tenant_a");
+  await store.get("unassign/tenant_a/serviceaccount", "tenant_a");
   assert.equal(fetches, 1);
 
   clock += 300001;
-  await store.get("unassign/tenant_a", "tenant_a");
+  await store.get("unassign/tenant_a/serviceaccount", "tenant_a");
   assert.equal(fetches, 2);
 
-  store.invalidate("unassign/tenant_a");
-  await store.get("unassign/tenant_a", "tenant_a");
+  store.invalidate("unassign/tenant_a/serviceaccount");
+  await store.get("unassign/tenant_a/serviceaccount", "tenant_a");
   assert.equal(fetches, 3);
 });
 

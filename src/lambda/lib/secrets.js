@@ -2,7 +2,8 @@
  * Scheduled Driver Unassign - service-account secrets
  * AdvantageOne
  *
- * One Secrets Manager secret per tenant, named `unassign/<database>`, holding
+ * One Secrets Manager secret per tenant, named
+ * `unassign/<database>/serviceaccount`, holding
  * the service account used for scheduled runs:
  *   { "database": "…", "server": "my.geotab.com", "userName": "svc-unassign", "password": "…" }
  * See docs/aws-port-implementation-prompt.md section 5.7. Values are cached for
