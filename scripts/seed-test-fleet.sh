@@ -37,8 +37,20 @@ ADMIN_GROUP_ID="GroupEverythingSecurityId"
 # MyGeotab's built-in root group, the same id src/core/unassign-core.js uses for
 # its AddInData writes. A driver or an asset has to belong to a group: a bare
 # `Add User` is refused with "-32000: User's CompanyGroups cannot be null or
-# empty", so every record this script creates is put in the Company group.
+# empty", so every record this script creates is put in the Company group. A
+# driver additionally needs a security *clearance* ("-32000: User's
+# SecurityGroups cannot be null or empty").
 COMPANY_GROUP_ID="GroupCompanyId"
+# The built-in clearances are named Group<Role>SecurityId (this repo already
+# relies on GroupEverythingSecurityId), so the Driver one is found by shape, not
+# by a name that is translated — and whatever is chosen is checked against the
+# database's own group list before it is sent.
+DRIVER_SECURITY_GROUP_PATTERN="^Group[A-Za-z]*Driver[A-Za-z]*SecurityId$"
+FALLBACK_SECURITY_GROUP_ID="GroupEverythingSecurityId"
+SECURITY_GROUP_ID=""
+COMPANY_GROUP_NAME=""
+SECURITY_GROUP_NAME=""
+SEED_GROUPS="[]"
 
 usage() {
   cat <<'USAGE'
@@ -57,6 +69,10 @@ Options:
   --server HOST    MyGeotab server (default my.geotab.com; regional servers like
                    myg.geotab.com or a US server work the same way).
   --count N        Drivers and assets to create (default 10; same number each).
+  --security-group ID
+                   Security clearance for the seeded drivers. Discovered from
+                   the database by default (its built-in Driver group), falling
+                   back to an account-level one; pass an id to be explicit.
   --dry-run        Sign in, print what would be created, write nothing.
   --cleanup        Remove every record this script created in a previous run
                    (names starting A1SEED-). The database name must be typed
@@ -97,6 +113,8 @@ while [ "$#" -gt 0 ]; do
     --count=*)    COUNT="${1#--count=}"; shift ;;
     --api-base)   [ "$#" -ge 2 ] || die_fix "--api-base needs a value" "pass --api-base https://host/apiv1"; API_BASE="$2"; shift 2 ;;
     --api-base=*) API_BASE="${1#--api-base=}"; shift ;;
+    --security-group)   [ "$#" -ge 2 ] || die_fix "--security-group needs a value" "pass --security-group <group id>"; SECURITY_GROUP_ID="$2"; shift 2 ;;
+    --security-group=*) SECURITY_GROUP_ID="${1#--security-group=}"; shift ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --cleanup)    CLEANUP=1; shift ;;
     --selftest)   SELFTEST=1; shift ;;
@@ -131,12 +149,47 @@ seed_count() { # <text>
   printf '%s\n' "${1:-}" | grep -c . || true
 }
 
+# Does the database actually have this group? Never send an id that was guessed:
+# MyGeotab rejects the whole Add.
+seed_group_exists() { # <groups json> <id>
+  local groups="${1:-}" id="${2:-}"
+  [ -n "$id" ] || return 1
+  printf '%s' "$groups" | jq -e --arg id "$id" 'any(.[]; .id == $id)' >/dev/null 2>&1
+}
+
+seed_group_name() { # <groups json> <id>
+  printf '%s' "${1:-}" | jq -r --arg id "${2:-}" '[.[] | select(.id == $id) | .name] | first // empty'
+}
+
+# For the error message when an id is not in the database: show what is.
+# (Joined in jq: `paste -d', '` cycles its delimiter list, so it would alternate
+# between a comma and a space.)
+seed_group_list() { # <groups json>
+  printf '%s' "${1:-}" | jq -r '[.[] | "\(.id) (\(.name))"] | join(", ")' 2>/dev/null || true
+}
+
+# The database's built-in Driver clearance, found by id shape (names are localised).
+seed_driver_security_group_id() { # <groups json>
+  printf '%s' "${1:-}" | jq -r --arg pattern "$DRIVER_SECURITY_GROUP_PATTERN" \
+    '[.[] | select((.id // "") | test($pattern)) | .id] | first // empty'
+}
+
+# The ids every driver needs: a company group to belong to, and a clearance.
+seed_group_ids() { # <groups json> <requested security group> -> "company<TAB>security"
+  local groups="${1:-}" requested="${2:-}" company security
+  company="$COMPANY_GROUP_ID"
+  security="$requested"
+  [ -n "$security" ] || security="$(seed_driver_security_group_id "$groups")"
+  [ -n "$security" ] || security="$FALLBACK_SECURITY_GROUP_ID"
+  printf '%s\t%s\n' "$company" "$security"
+}
+
 # A driver is a User with isDriver set; only fields MyGeotab needs are sent, and
-# companyGroups is one of them (a driver with no group cannot be created).
-seed_user_json() { # <name> <index> <group id>
-  jq -n --arg name "${1:-}" --arg index "${2:-}" --arg group "${3:-}" \
+# both memberships are among them (a driver with neither cannot be created).
+seed_user_json() { # <name> <index> <company group id> <security group id>
+  jq -n --arg name "${1:-}" --arg index "${2:-}" --arg company "${3:-}" --arg security "${4:-}" \
     '{name: $name, firstName: "Test", lastName: ("Driver " + $index), isDriver: true,
-      companyGroups: [{id: $group}]}'
+      companyGroups: [{id: $company}], securityGroups: [{id: $security}]}'
 }
 
 # The same for an asset: Device.groups, or MyGeotab has nowhere to file it.
@@ -344,13 +397,36 @@ build_batch() {
   SEED_FROM="$(date -u +%Y-%m-%dT%H:%M:00.000Z)"
 }
 
+# Both memberships a driver needs come from the database itself, so nothing is
+# guessed: the requested id (--security-group), else its built-in Driver
+# clearance, else the account-level one this repo already knows exists.
+resolve_groups() {
+  local pair
+  SEED_GROUPS="$(get_all "Group")"
+  pair="$(seed_group_ids "$SEED_GROUPS" "$SECURITY_GROUP_ID")"
+  COMPANY_GROUP_ID="$(printf '%s' "$pair" | cut -f1)"
+  SECURITY_GROUP_ID="$(printf '%s' "$pair" | cut -f2)"
+  if ! seed_group_exists "$SEED_GROUPS" "$COMPANY_GROUP_ID"; then
+    die_fix "$DATABASE has no group '$COMPANY_GROUP_ID', so a driver would be refused" \
+            "this database's groups are: $(seed_group_list "$SEED_GROUPS")"
+  fi
+  if ! seed_group_exists "$SEED_GROUPS" "$SECURITY_GROUP_ID"; then
+    die_fix "$DATABASE has no group '$SECURITY_GROUP_ID' to use as the drivers' clearance" \
+            "pass --security-group <id>; this database's groups are: $(seed_group_list "$SEED_GROUPS")"
+  fi
+  COMPANY_GROUP_NAME="$(seed_group_name "$SEED_GROUPS" "$COMPANY_GROUP_ID")"
+  SECURITY_GROUP_NAME="$(seed_group_name "$SEED_GROUPS" "$SECURITY_GROUP_ID")"
+  ok "drivers get the '$SECURITY_GROUP_NAME' clearance ($SECURITY_GROUP_ID)"
+  info "records belong to the '$COMPANY_GROUP_NAME' group ($COMPANY_GROUP_ID)"
+}
+
 # Every entity goes through the pure builders above, so what is sent is exactly
 # what --selftest pins — no second copy of the naming rules in a jq string.
 add_users() { # -> ids on stdout, one per line
   local i name id
   for ((i = 1; i <= COUNT; i++)); do
     name="$(seed_name "$BATCH" Driver "$i")"
-    id="$(add_one "User" "$(seed_user_json "$name" "$i" "$COMPANY_GROUP_ID")" "driver $name")" || return 1
+    id="$(add_one "User" "$(seed_user_json "$name" "$i" "$COMPANY_GROUP_ID" "$SECURITY_GROUP_ID")" "driver $name")" || return 1
     printf '%s\n' "$id"
   done
 }
@@ -481,15 +557,42 @@ run_selftest() {
   st_eq "counting a captured list" "3" "$(seed_count "$(printf 'a\nb\nc\n')")"
   st_eq "counting nothing is zero, not an error" "0" "$(seed_count "")"
 
+  # A database's groups, as Get Group returns them: the built-ins this repo relies
+  # on, plus a customer group that happens to have "Driver" in its name.
+  local groups='[
+    {"id":"GroupCompanyId","name":"Company Group"},
+    {"id":"GroupEverythingSecurityId","name":"Everything"},
+    {"id":"GroupDriverSecurityId","name":"Driver"},
+    {"id":"b42","name":"Drivers - Toronto"}
+  ]'
+  st_eq "the built-in Driver clearance is found by id shape" "GroupDriverSecurityId" \
+        "$(seed_driver_security_group_id "$groups")"
+  st_eq "a database without one has no answer, rather than a guess" "" \
+        "$(seed_driver_security_group_id '[{"id":"b42","name":"Drivers"}]')"
+  st_true "an id in the database is accepted" seed_group_exists "$groups" "GroupCompanyId"
+  st_false "an id that is not there is refused" seed_group_exists "$groups" "GroupNopeSecurityId"
+  st_eq "the company group goes with the discovered clearance" "GroupCompanyId:GroupDriverSecurityId" \
+        "$(seed_group_ids "$groups" "" | tr '\t' ':')"
+  st_eq "an explicit --security-group wins" "GroupCompanyId:GroupEverythingSecurityId" \
+        "$(seed_group_ids "$groups" "GroupEverythingSecurityId" | tr '\t' ':')"
+  st_eq "a database with only account-level groups falls back to that one" \
+        "GroupCompanyId:GroupEverythingSecurityId" \
+        "$(seed_group_ids '[{"id":"GroupCompanyId","name":"Company Group"},{"id":"GroupEverythingSecurityId","name":"Everything"}]' "" | tr '\t' ':')"
+  st_eq "the group list names what is there" "GroupCompanyId (Company Group), GroupDriverSecurityId (Driver)" \
+        "$(seed_group_list '[{"id":"GroupCompanyId","name":"Company Group"},{"id":"GroupDriverSecurityId","name":"Driver"}]')"
+
   local user device change search
-  user="$(seed_user_json "A1SEED-x-Driver-01" 1 "GroupCompanyId")"
+  user="$(seed_user_json "A1SEED-x-Driver-01" 1 "GroupCompanyId" "GroupDriverSecurityId")"
   st_eq "driver name" "A1SEED-x-Driver-01" "$(printf '%s' "$user" | jq -r .name)"
   st_eq "a driver is a User with isDriver" "true" "$(printf '%s' "$user" | jq -r .isDriver)"
-  st_eq "driver fields are what MyGeotab needs" "companyGroups firstName isDriver lastName name" \
+  st_eq "driver fields are what MyGeotab needs" "companyGroups firstName isDriver lastName name securityGroups" \
         "$(printf '%s' "$user" | jq -r 'keys | join(" ")')"
-  # Without this the API refuses the Add: "User's CompanyGroups cannot be null or empty".
+  # Without these the API refuses the Add twice over: "User's CompanyGroups cannot
+  # be null or empty", then "User's SecurityGroups cannot be null or empty".
   st_eq "the driver belongs to the company group" "GroupCompanyId" \
         "$(printf '%s' "$user" | jq -r '.companyGroups[0].id')"
+  st_eq "the driver has a clearance" "GroupDriverSecurityId" \
+        "$(printf '%s' "$user" | jq -r '.securityGroups[0].id')"
   device="$(seed_device_json "A1SEED-x-Asset-01" "A1SEED-x-SN-01" "GroupCompanyId")"
   st_eq "device name" "A1SEED-x-Asset-01" "$(printf '%s' "$device" | jq -r .name)"
   st_eq "device serial number" "A1SEED-x-SN-01" "$(printf '%s' "$device" | jq -r .serialNumber)"
@@ -546,12 +649,17 @@ step "Signing in to $DATABASE on $SERVER"
 authenticate
 ok "signed in as $USER_NAME on database $DATABASE ($MYGEOTAB_IDENTITY)"
 
+# Which group and clearance the new records join, from this database's own groups
+# (also read before --dry-run, so the plan names them).
+resolve_groups
+
 if [ "$DRY_RUN" -eq 1 ]; then
   build_batch
   step "Dry run: nothing will be written"
   printf '%s\n' "  database : $DATABASE"
   printf '%s\n' "  server   : $SERVER"
   printf '%s\n' "  batch    : $BATCH"
+  printf '%s\n' "  groups   : drivers in '$COMPANY_GROUP_NAME', clearance '$SECURITY_GROUP_NAME' ($SECURITY_GROUP_ID)"
   printf '%s\n' "  would add: $COUNT drivers (Add User, isDriver: true)"
   printf '%s\n' "             $COUNT assets (Add Device)"
   printf '%s\n' "             $COUNT assignments (Add DriverChange, driver named, type Driver)"
