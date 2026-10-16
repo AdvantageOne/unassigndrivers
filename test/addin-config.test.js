@@ -11,7 +11,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
+const { existsSync, readFileSync } = require("node:fs");
+const { execFileSync } = require("node:child_process");
 const { join } = require("node:path");
 
 const ROOT = join(__dirname, "..");
@@ -53,14 +54,33 @@ test("the repo's config files differ only in where the page is served from", () 
   assert.equal(read("config.ca.json").version, read("config.us.json").version);
 });
 
-test("the add-in page the configs name is the one the deploy uploads", () => {
+/** Runs the deploy's own pure helpers, so the test checks behaviour, not source text. */
+function shell(expressions) {
+  return execFileSync("bash", ["-c", `. scripts/lib/common.sh\n${expressions}`], {
+    cwd: ROOT,
+    encoding: "utf8"
+  }).trim();
+}
+
+test("each config names exactly the page the deploy publishes for its region", () => {
   for (const { code } of REGIONS) {
-    assert.match(read(`config.${code}.json`).items[0].url, /\/unassign\/unassignDrivers\.html$/);
+    const url = shell(
+      `addin_object_url "$(region_field ${code} addin)" "$(region_field ${code} region)" "$(addin_object_key)"`
+    );
+    assert.equal(read(`config.${code}.json`).items[0].url, url, `config.${code}.json must match the deploy`);
   }
-  // Same key and bucket names the deploy script uses; the two must not drift.
-  const common = readFileSync(join(ROOT, "scripts", "lib", "common.sh"), "utf8");
-  for (const { bucket } of REGIONS) {
-    assert.ok(common.includes(bucket), `scripts/lib/common.sh must know ${bucket}`);
+  assert.equal(shell('addin_object_key'), "unassign/unassignDrivers.html");
+});
+
+test("every language the config declares has a translations file beside the page", () => {
+  const langs = shell("addin_translation_langs").split(/\s+/).filter(Boolean);
+  assert.deepEqual(langs, Object.keys(read("config.ca.json").items[0].menuName).sort(), "same languages");
+  for (const lang of langs) {
+    const file = join(ROOT, "translations", `${lang}.json`);
+    assert.ok(existsSync(file), `translations/${lang}.json must exist`);
+    const map = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(typeof map, "object");
+    // MyGeotab fetches these from beside the page: <page dir>/translations/<lang>.json
+    assert.equal(shell(`addin_translation_key ${lang}`), `unassign/translations/${lang}.json`);
   }
-  assert.match(common, /addin_object_key\(\) \{ printf 'unassign\/unassignDrivers\.html\\n'/);
 });

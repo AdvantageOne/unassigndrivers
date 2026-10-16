@@ -63,6 +63,7 @@ Everything else in the HTML (markup, styles, the UI script) is hand-edited as be
 | `scheduled-unassign.yml`, `.github/workflows/` (removed at cutover) | deleted | The old trigger; see §6 |
 | `config.json` | published | Add-in configuration (jsDelivr tag + version) |
 | `config.ca.json`, `config.us.json` | published | One per region: the configuration an operator pastes, pointing at that region's published page |
+| `translations/{en,fr}.json` | published | Strings MyGeotab fetches from `<page dir>/translations/<lang>.json`; `scripts/deploy.sh` uploads them and checks them through the browser's CORS path |
 
 ## 4. How the two paths work
 
@@ -239,6 +240,16 @@ it types the database name back before writing, and `--cleanup` removes the batc
     `options.load`, which broke every request with `INTERNAL: options.load is not a function`. When
     you change an argument, an option name or a contract, assert on the call site: `test/deps.test.js`
     exists for exactly that, building the real dependencies and *using* each one.
+
+17. **The hosting bucket needs the CORS rule, not just the read policy.** A browser on a MyGeotab
+    host fetches the add-in's assets itself — MyGeotab's translator requests
+    `translations/<lang>.json` from beside the page — and S3 answers without
+    `Access-Control-Allow-Origin` unless the bucket says so. The browser then reports a CORS
+    failure, *not* a 403, so the object looks missing when it is the header that is missing.
+    `scripts/deploy.sh` writes the rule from the Lambda's own `ALLOWED_ORIGINS` (S3 accepts at most
+    one `*` per entry, which those patterns satisfy) and then fetches every published object **with
+    an `Origin` header** to check it. A bucket created by hand — any new region — has no rule until
+    a deploy runs, and an empty `ALLOWED_ORIGINS` warns rather than inventing one.
 
 ## 8. What is verified, and what is not
 

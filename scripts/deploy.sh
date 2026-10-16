@@ -213,6 +213,29 @@ run_selftest() {
   done
   st_false "a missing configuration file is reported, not guessed" \
            addin_config_url "$PLAN_DIR/absent-config.json"
+
+  # The bucket's CORS rule mirrors the service's own ALLOWED_ORIGINS, so the page
+  # and the translations are fetchable from a MyGeotab frame.
+  st_eq "the add-in prefix" "unassign/" "$(addin_prefix)"
+  st_eq "translations live beside the page" "unassign/translations/en.json" "$(addin_translation_key en)"
+  st_eq "both languages the configuration declares" "en fr" "$(addin_translation_langs | paste -sd' ' -)"
+  st_true "S3 can express the service's origin pattern" s3_cors_origin_ok "https://*.geotab.com"
+  st_true "S3 can express a bare wildcard" s3_cors_origin_ok "*"
+  st_false "S3 cannot express two wildcards in one origin" s3_cors_origin_ok "https://*.*.geotab.com"
+  st_false "an empty origin is not expressible" s3_cors_origin_ok ""
+  # Built with map(join) rather than one joined expression per element: in jq,
+  # `a | b, c` binds as `a | (b, c)`, which joins the first list twice over.
+  st_eq "the CORS rule allows exactly the deployment's origins, and only reads" \
+        "https://*.geotab.com|http://localhost:3000|GET|HEAD|*" \
+        "$(addin_cors_rule_json 'https://*.geotab.com, http://localhost:3000' \
+           | jq -r '[.CORSRules[0].AllowedOrigins, .CORSRules[0].AllowedMethods, .CORSRules[0].AllowedHeaders] | map(join("|")) | join("|")')"
+  st_false "a CORS rule without origins is refused" addin_cors_rule_json ""
+  st_false "a CORS rule with an origin S3 cannot express is refused" addin_cors_rule_json "https://*.*.example.com"
+  for lang in $(addin_translation_langs); do
+    st_true "translations/$lang.json exists in the repo" test -f "$REPO_ROOT/translations/$lang.json"
+    st_true "translations/$lang.json is a JSON object" bash -c \
+            "jq -e 'type == \"object\"' '$REPO_ROOT/translations/$lang.json' >/dev/null"
+  done
   # What the upload says about the copy that was already there.
   st_eq "a bucket with no page yet says nothing about the previous copy" "" "$(addin_upload_note "" "\"abc\"")"
   st_eq "an unchanged page is reported as identical" "identical" "$(addin_upload_note "\"abc\"" "\"abc\"")"
@@ -882,8 +905,11 @@ create_addin_bucket() { # <bucket>
 
 # Public read of this service's own prefix, granted by policy — ACLs stay
 # blocked. The page is fetched by MyGeotab, so it cannot require credentials.
-configure_addin_bucket() { # <bucket>
-  local bucket="$1" policy
+# The CORS rule matters just as much: the page and its translations are fetched
+# from a my.geotab.com frame, and without it the browser blocks them ("No
+# 'Access-Control-Allow-Origin' header is present on the requested resource").
+configure_addin_bucket() { # <bucket> <comma-separated origins, from the function>
+  local bucket="$1" allowed="${2:-}" policy cors rc=0
   policy="$(jq -n --arg bucket "$bucket" '{Version:"2012-10-17", Statement:[{
     Sid: "ReadTheAddinPage",
     Effect: "Allow",
@@ -899,6 +925,26 @@ configure_addin_bucket() { # <bucket>
   must_aws "attach the read policy to s3://$bucket" \
            "grant s3:PutBucketPolicy on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
            s3api put-bucket-policy --bucket "$bucket" --policy "$policy"
+
+  if [ -z "$allowed" ]; then
+    warn "the deployment has no ALLOWED_ORIGINS, so the bucket got no CORS rule and a browser will block the add-in's own fetches"
+    hint "set allowed_origins in infra/live/$REGION_CODE and re-run $SCRIPT_NAME --region $REGION_CODE"
+  else
+    cors="$(addin_cors_rule_json "$allowed")" || rc=$?
+    case "${rc:-0}" in
+      0) : ;;
+      2) cors="" ; warn "ALLOWED_ORIGINS is empty, so the bucket got no CORS rule" ;;
+      *) die_fix "ALLOWED_ORIGINS ('$allowed') contains an origin S3 cannot express (at most one '*' per entry)" \
+                 "fix allowed_origins in infra/live/$REGION_CODE (for example https://*.geotab.com), then re-run $SCRIPT_NAME --region $REGION_CODE" ;;
+    esac
+    if [ -n "$cors" ]; then
+      must_aws "allow the add-in's origins to read s3://$bucket from a browser" \
+               "grant s3:PutBucketCORS on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+               s3api put-bucket-cors --bucket "$bucket" --cors-configuration "$cors"
+      ok "bucket CORS: $(printf '%s' "$allowed" | tr ',' ' ')"
+    fi
+  fi
+
   # Versions let a bad page be rolled back without a redeploy.
   if ! aws_try s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled >/dev/null; then
     warn "could not enable versioning on s3://$bucket: $(aws_error_reason "$(aws_last_err)")"
@@ -908,7 +954,8 @@ configure_addin_bucket() { # <bucket>
 # publish_addin <bucket> <function-url>: uploads the page and proves it is
 # readable from where MyGeotab reads it.
 publish_addin() {
-  local bucket="$1" key page public rc=0 body status content_type url before before_display landed landed_size landed_etag landed_version
+  local bucket="$1" key page public rc=0 url before before_display landed landed_size landed_etag landed_version
+  local allowed_origins probe_origin lang file translation_key
   url="$(strip_trailing_slashes "${2:-}")"
   key="$(addin_object_key)"
   public="$(addin_object_url "$bucket" "$AWS_REGION" "$key")"
@@ -918,8 +965,15 @@ publish_addin() {
     return 0
   fi
 
+  # The origins the deployment already accepts are the authority for the bucket's
+  # CORS rule — reading them keeps the two from drifting.
+  allowed_origins="$(aws_try lambda get-function-configuration --function-name "$FN_NAME" \
+                     --query 'Environment.Variables.ALLOWED_ORIGINS' --output text \
+                     --region "$AWS_REGION" 2>/dev/null || true)"
+  case "$allowed_origins" in None) allowed_origins="" ;; esac
+
   addin_bucket_exists "$bucket" || create_addin_bucket "$bucket"
-  configure_addin_bucket "$bucket"
+  configure_addin_bucket "$bucket" "$allowed_origins"
 
   page="$(mktemp "${TMPDIR:-/tmp}/unassign-addin.XXXXXX")" || die_fix "could not create a temp file" "is TMPDIR writable?"
   render_addin_html "$REPO_ROOT/unassignDrivers.html" "$url" > "$page" || rc=$?
@@ -968,25 +1022,83 @@ publish_addin() {
     esac
   fi
 
+  # MyGeotab fetches translations from a folder beside the page, so they ship
+  # with it: without them the add-in's own fetch fails (and without CORS on the
+  # bucket, the browser refuses the response before the status even matters).
+  local translation_url
+  for lang in $(addin_translation_langs); do
+    file="$REPO_ROOT/translations/$lang.json"
+    translation_key="$(addin_translation_key "$lang")"
+    if [ ! -f "$file" ]; then
+      warn "no $file, so s3://$bucket/$translation_key will not exist and MyGeotab's $lang fetch will fail"
+      continue
+    fi
+    if ! jq -e . "$file" >/dev/null 2>&1; then
+      die_fix "$file is not valid JSON" \
+              "fix it (Geotab's own add-ins ship a {\"source string\": \"translation\"} map) and re-run $SCRIPT_NAME --region $REGION_CODE"
+    fi
+    must_aws "upload the $lang translations to s3://$bucket/$translation_key" \
+             "grant s3:PutObject on $bucket/unassign/*, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+             s3 cp "$file" "s3://$bucket/$translation_key" \
+             --content-type 'application/json; charset=utf-8' \
+             --cache-control 'public, max-age=60, must-revalidate' \
+             --metadata "deployment=$DEPLOYMENT_NAME" \
+             --region "$AWS_REGION" --only-show-errors
+    ok "uploaded the $lang translations: s3://$bucket/$translation_key"
+  done
+
   if ! command -v curl >/dev/null 2>&1; then
-    info "smoke test: skipping the add-in page fetch (curl is not installed)"
-    info "its public URL: $public"
+    info "smoke test: skipping the add-in fetches (curl is not installed)"
+    info "the page's public URL: $public"
     return 0
   fi
-  body="$(curl -sS -m 15 -w '\n%{http_code}|%{content_type}' "$public" 2>/dev/null || true)"
-  status="$(printf '%s' "$body" | tail -1 | cut -d'|' -f1)"
-  content_type="$(printf '%s' "$body" | tail -1 | cut -d'|' -f2)"
-  if [ "$status" != "200" ]; then
-    warn "the uploaded page is not readable at $public (HTTP ${status:-none})"
-    hint "public read comes from the bucket policy on /unassign/* — check: aws s3api get-bucket-policy --bucket $bucket --region $AWS_REGION"
-    return 0
+
+  # Fetched the way a browser fetches it: with an Origin header, expecting the
+  # bucket's CORS rule to answer. This is the check that would have caught the
+  # add-in's translations request being blocked.
+  probe_origin="$(probe_origin_from_pattern "${allowed_origins%%,*}")"
+  # Warnings, not failures: the uploads above are what must not fail.
+  verify_addin_object "$public" "$probe_origin" "the add-in page" "$url" || true
+  for lang in $(addin_translation_langs); do
+    [ -f "$REPO_ROOT/translations/$lang.json" ] || continue
+    translation_url="$(addin_object_url "$bucket" "$AWS_REGION" "$(addin_translation_key "$lang")")"
+    verify_addin_object "$translation_url" "$probe_origin" "the $lang translations" "" || true
+  done
+}
+
+# verify_addin_object <url> <origin> <what> [<text the body must contain>]
+# Fetches with an Origin header and checks what the browser needs: a status, the
+# CORS header for that origin, and (for the page) the endpoint it names.
+verify_addin_object() {
+  local url="$1" origin="$2" what="$3" must="${4:-}" rc=0 headers body status ctype allow
+  headers="$(mktemp "${TMPDIR:-/tmp}/unassign-headers.XXXXXX")"
+  body="$(mktemp "${TMPDIR:-/tmp}/unassign-body.XXXXXX")"
+  curl -sS -m 15 -D "$headers" -o "$body" -H "Origin: $origin" "$url" >/dev/null 2>&1 || rc=$?
+  # The status line is either "HTTP/2 200" or "HTTP/1.1 200 OK": take the code.
+  status="$(header_value "$headers" 'HTTP' | awk '{print $2}')"
+  ctype="$(header_value "$headers" 'content-type')"
+  allow="$(header_value "$headers" 'access-control-allow-origin')"
+
+  if [ "$rc" -ne 0 ] || [ -z "$status" ]; then
+    rm -f "$headers" "$body"
+    warn "could not fetch $what at $url (curl exit $rc)"
+    return 1
   fi
-  if printf '%s' "$body" | grep -qF "$url"; then
-    ok "the uploaded page is live: $public (HTTP 200, $content_type, names $url)"
-  else
-    warn "the published page does not name $url"
-    hint "it may be a cached copy: re-run $SCRIPT_NAME --region $REGION_CODE, then check with curl -s $public | grep SERVER_API_BASE"
+  if [ -z "$allow" ]; then
+    rm -f "$headers" "$body"
+    warn "$what does not allow the origin $origin, so the browser blocks it (HTTP $status)"
+    hint "the bucket's CORS rule comes from the Lambda's ALLOWED_ORIGINS — check: aws s3api get-bucket-cors --bucket <bucket> --region $AWS_REGION"
+    return 1
   fi
+  if [ -n "$must" ] && ! grep -qF "$must" "$body"; then
+    rm -f "$headers" "$body"
+    warn "$what is served but does not name $must"
+    hint "it may be a cached copy: re-run $SCRIPT_NAME --region $REGION_CODE, then check with curl -s $url | grep SERVER_API_BASE"
+    return 1
+  fi
+  rm -f "$headers" "$body"
+  ok "$what: $url (HTTP $status, $ctype, ${must:+names $must, }allows $origin)"
+  return 0
 }
 
 # print_addin_config <public url>: the region's committed configuration, checked

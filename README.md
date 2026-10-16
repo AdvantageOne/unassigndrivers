@@ -79,6 +79,7 @@ still republishes the add-in page, so add-in fixes ship with the same command. S
 
 ```
 unassignDrivers.html            the add-in; built regions are generated (see below)
+translations/{en,fr}.json       strings MyGeotab fetches from beside the page (published by the deploy)
 config.ca.json                  add-in configuration for the Canada database (S3 page)
 config.us.json                  add-in configuration for the United States database (S3 page)
 config.json                     standalone/legacy install; loads the page from jsDelivr

@@ -120,9 +120,23 @@ Advantage One's add-ins). The deploy creates a missing one and applies, every ru
 
 - **public read by policy**, scoped to this service's own `unassign/` prefix — object ACLs stay
   blocked, so a bug here cannot expose another service's objects;
+- **a CORS rule mirroring the Lambda's `ALLOWED_ORIGINS`**, so a browser on a MyGeotab host may read
+  them (`GET`/`HEAD` only). Without it MyGeotab's own fetches are blocked — the translator loads
+  `translations/<lang>.json` from beside the page, and the browser refuses a response that carries no
+  `Access-Control-Allow-Origin`. If `ALLOWED_ORIGINS` is empty the deploy warns instead of inventing
+  a rule, and an origin S3 cannot express (two `*` in one entry) stops it;
 - **versioning on**, so a bad upload can be rolled back without a redeploy;
-- `Cache-Control: public, max-age=60, must-revalidate` on the page, so a fresh deploy is visible
+- `Cache-Control: public, max-age=60, must-revalidate` on every object, so a fresh deploy is visible
   within a minute.
+
+Each deploy publishes, and checks by fetching it back **with an `Origin` header** (the browser's own
+path, which is how a missing CORS rule gets caught here rather than in a console):
+
+| Object | What it is |
+|---|---|
+| `unassign/unassignDrivers.html` | the page, with this region's endpoint stamped in |
+| `unassign/translations/en.json` | the add-in's translatable strings, English (`translations/en.json` in the repo) |
+| `unassign/translations/fr.json` | the same keys in French, matching the configuration's `menuName.fr` |
 
 The repo's copy of `unassignDrivers.html` stays committed pointing at **Canada**
 (`https://yfzpzulqadv5r7rkbtbenmphiy0xrdnl.lambda-url.ca-central-1.on.aws`) so it works when opened

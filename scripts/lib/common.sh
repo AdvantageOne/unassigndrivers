@@ -404,10 +404,23 @@ secret_name_for() { printf 'unassign/%s/serviceaccount\n' "${1:-}"; }
 # ---------------------------------------------------------------------------
 # Add-in hosting (pure; exercised by --selftest)
 # ---------------------------------------------------------------------------
-# The page customers' MyGeotab loads. One copy per deployment, filed under this
+# What customers' MyGeotab loads. One copy per deployment, filed under this
 # service's prefix in the region's hosting bucket:
 #   s3://<addin bucket>/unassign/unassignDrivers.html
-addin_object_key() { printf 'unassign/unassignDrivers.html\n'; }
+#   s3://<addin bucket>/unassign/translations/<lang>.json
+# MyGeotab fetches the translations itself, from a `translations` folder beside
+# the page (that is the layout Geotab's own sample add-ins ship), so they have to
+# be published next to it and be readable from the MyGeotab origin.
+addin_prefix() { printf 'unassign/\n'; }
+
+addin_object_key() { printf '%sunassignDrivers.html\n' "$(addin_prefix)"; }
+
+addin_translation_key() { # <lang>
+  printf '%stranslations/%s.json\n' "$(addin_prefix)" "${1:-}"
+}
+
+# The languages to publish, matching the add-in configuration's menuName.
+addin_translation_langs() { printf 'en\nfr\n'; }
 
 # The URL MyGeotab is pointed at. The S3 *website* endpoint answers over plain
 # HTTP only, which an HTTPS MyGeotab page refuses to load, so this is the REST
@@ -453,6 +466,38 @@ addin_config_path() { # <repo root> <code>
 addin_config_url() { # <config file> -> the page url it points at
   [ -f "${1:-}" ] || return 2
   jq -r '.items[0].url // empty' "$1"
+}
+
+# S3 allows at most one `*` per AllowedOrigins entry, which is also the shape the
+# service's own ALLOWED_ORIGINS patterns use — so the bucket rule can mirror that
+# list exactly rather than inventing a second policy. A pattern S3 cannot express
+# must fail here, not silently produce a rule that never matches.
+s3_cors_origin_ok() { # <origin or pattern>
+  local origin="${1:-}" stars
+  [ -n "$origin" ] || return 1
+  stars="$(printf '%s' "$origin" | tr -cd '*' | wc -c | tr -d ' ')"
+  [ "$stars" -le 1 ]
+}
+
+# The bucket's CORS rule, for the origins the deployment already accepts: the
+# page and the translations are fetched by MyGeotab's frame, so a browser will
+# block them without it. 2 = no origins, 3 = an origin S3 cannot express.
+addin_cors_rule_json() { # <comma-separated origins> -> the CORSRules document
+  local allowed="${1:-}" origin origins="[]"
+  [ -n "$allowed" ] || return 2
+  while IFS= read -r origin; do
+    [ -n "$origin" ] || continue
+    s3_cors_origin_ok "$origin" || return 3
+    origins="$(printf '%s' "$origins" | jq -c --arg o "$origin" '. + [$o]')"
+  done <<< "$(printf '%s' "$allowed" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  [ "$origins" != "[]" ] || return 2
+  jq -n --argjson origins "$origins" '{CORSRules: [{
+    AllowedOrigins: $origins,
+    AllowedMethods: ["GET", "HEAD"],
+    AllowedHeaders: ["*"],
+    ExposeHeaders: ["ETag", "Content-Length", "Last-Modified"],
+    MaxAgeSeconds: 3000
+  }]}'
 }
 
 # addin_upload_note <previous etag> <current etag> -> "identical" | "changed" | ""
