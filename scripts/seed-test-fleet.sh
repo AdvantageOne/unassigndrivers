@@ -150,6 +150,38 @@ seed_count() { # <text>
   printf '%s\n' "${1:-}" | grep -c . || true
 }
 
+# A driver needs a password ("-32000: Value cannot be null. (Parameter
+# 'Password')"), and it has to satisfy the database's password policy, which may
+# require a symbol — a 32-character alphanumeric would fail that by design, not
+# by bad luck. One random password per driver, never printed and never logged:
+# nobody signs in as these records, and an admin can reset one if that changes.
+PASSWORD_ALPHABET='A-Za-z0-9!@#%^*_+=?-'
+seed_password() {
+  local attempt=0 raw
+  while [ "$attempt" -lt 5 ]; do
+    attempt=$((attempt + 1))
+    raw=""
+    if command -v openssl >/dev/null 2>&1; then
+      raw="$(LC_ALL=C openssl rand -base64 96 2>/dev/null | LC_ALL=C tr -dc "$PASSWORD_ALPHABET" || true)"
+    fi
+    if [ "${#raw}" -lt 32 ] && command -v node >/dev/null 2>&1; then
+      raw="$(node -e '
+        const c = require("crypto").randomBytes(96).toString("base64").replace(/[^A-Za-z0-9!@#%^*_+=?-]/g, "");
+        process.stdout.write(c);
+      ' 2>/dev/null || true)"
+    fi
+    [ "${#raw}" -ge 32 ] || continue
+    raw="${raw:0:32}"
+    # One of each class, checked rather than hoped for.
+    if printf '%s' "$raw" | grep -q '[A-Z]' && printf '%s' "$raw" | grep -q '[a-z]' \
+       && printf '%s' "$raw" | grep -q '[0-9]' && printf '%s' "$raw" | grep -q '[^A-Za-z0-9]'; then
+      printf '%s\n' "$raw"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Does the database actually have this group? Never send an id that was guessed:
 # MyGeotab rejects the whole Add.
 seed_group_exists() { # <groups json> <id>
@@ -208,10 +240,11 @@ seed_choose_clearance() { # <requested> <known ids newline> <caller's first id>
 
 # A driver is a User with isDriver set; only fields MyGeotab needs are sent, and
 # both memberships are among them (a driver with neither cannot be created).
-seed_user_json() { # <name> <index> <company group id> <security group id>
+seed_user_json() { # <name> <index> <company group id> <security group id> <password>
   jq -n --arg name "${1:-}" --arg index "${2:-}" --arg company "${3:-}" --arg security "${4:-}" \
+        --arg password "${5:-}" \
     '{name: $name, firstName: "Test", lastName: ("Driver " + $index), isDriver: true,
-      companyGroups: [{id: $company}], securityGroups: [{id: $security}]}'
+      companyGroups: [{id: $company}], securityGroups: [{id: $security}], password: $password}'
 }
 
 # The same for an asset: Device.groups, or MyGeotab has nowhere to file it.
@@ -450,10 +483,11 @@ resolve_groups() {
 # Every entity goes through the pure builders above, so what is sent is exactly
 # what --selftest pins — no second copy of the naming rules in a jq string.
 add_users() { # -> ids on stdout, one per line
-  local i name id
+  local i name id password
   for ((i = 1; i <= COUNT; i++)); do
     name="$(seed_name "$BATCH" Driver "$i")"
-    id="$(add_one "User" "$(seed_user_json "$name" "$i" "$COMPANY_GROUP_ID" "$SECURITY_GROUP_ID")" "driver $name")" || return 1
+    password="$(seed_password)" || die_fix "could not generate a password for $name" "install openssl or node, then re-run"
+    id="$(add_one "User" "$(seed_user_json "$name" "$i" "$COMPANY_GROUP_ID" "$SECURITY_GROUP_ID" "$password")" "driver $name")" || return 1
     printf '%s\n' "$id"
   done
 }
@@ -493,8 +527,9 @@ verify_assignments() { # <driver ids> <device ids> -> "index<TAB>driverId<TAB>ex
 }
 
 seed_fleet() {
-  local drivers devices assignments listed
+  local drivers devices listed
   step "Creating $COUNT drivers in $DATABASE"
+  info "each driver gets its own random password, never printed: nobody signs in as these records (an admin can reset one if that ever changes)"
   drivers="$(add_users)"
   info "added $(seed_count "$drivers") drivers (Add User, isDriver: true)"
   step "Creating $COUNT assets in $DATABASE"
@@ -621,12 +656,26 @@ run_selftest() {
         "GroupDriverSecurityId"$'\n'"GroupEverythingSecurityId" \
         "$(seed_known_clearance_ids '[{"id":"GroupCompanyId","name":"Company Group"},{"id":"GroupDriverSecurityId","name":"Driver"}]' "GroupEverythingSecurityId"$'\n')"
 
+  # MyGeotab refuses a driver with no password, and the password has to satisfy
+  # the database's policy — which may demand a symbol, so the alphabet includes
+  # them rather than relying on 32 alphanumerics passing.
+  local pw1 pw2
+  pw1="$(seed_password)"
+  pw2="$(seed_password)"
+  st_eq "a generated password is 32 characters" "32" "${#pw1}"
+  st_true "it has an uppercase letter" bash -c "printf '%s' '$pw1' | grep -q '[A-Z]'"
+  st_true "it has a lowercase letter" bash -c "printf '%s' '$pw1' | grep -q '[a-z]'"
+  st_true "it has a digit" bash -c "printf '%s' '$pw1' | grep -q '[0-9]'"
+  st_true "it has a symbol, so a strict policy still passes" bash -c "printf '%s' '$pw1' | grep -q '[^A-Za-z0-9]'"
+  st_false "two drivers do not share a password" test "$pw1" = "$pw2"
+
   local user device change search
-  user="$(seed_user_json "A1SEED-x-Driver-01" 1 "GroupCompanyId" "GroupDriverSecurityId")"
+  user="$(seed_user_json "A1SEED-x-Driver-01" 1 "GroupCompanyId" "GroupDriverSecurityId" "s3cret-Passw0rd!")"
   st_eq "driver name" "A1SEED-x-Driver-01" "$(printf '%s' "$user" | jq -r .name)"
   st_eq "a driver is a User with isDriver" "true" "$(printf '%s' "$user" | jq -r .isDriver)"
-  st_eq "driver fields are what MyGeotab needs" "companyGroups firstName isDriver lastName name securityGroups" \
+  st_eq "driver fields are what MyGeotab needs" "companyGroups firstName isDriver lastName name password securityGroups" \
         "$(printf '%s' "$user" | jq -r 'keys | join(" ")')"
+  st_eq "the driver carries its password" "s3cret-Passw0rd!" "$(printf '%s' "$user" | jq -r .password)"
   # Without these the API refuses the Add twice over: "User's CompanyGroups cannot
   # be null or empty", then "User's SecurityGroups cannot be null or empty".
   st_eq "the driver belongs to the company group" "GroupCompanyId" \
@@ -700,7 +749,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   printf '%s\n' "  server   : $SERVER"
   printf '%s\n' "  batch    : $BATCH"
   printf '%s\n' "  groups   : drivers in '$COMPANY_GROUP_NAME'; clearance $SECURITY_GROUP_ID (from $SECURITY_GROUP_SOURCE)"
-  printf '%s\n' "  would add: $COUNT drivers (Add User, isDriver: true)"
+  printf '%s\n' "  would add: $COUNT drivers (Add User, isDriver: true, each with its own random password)"
   printf '%s\n' "             $COUNT assets (Add Device)"
   printf '%s\n' "             $COUNT assignments (Add DriverChange, driver named, type Driver)"
   printf '%s\n' "  first driver would be: $(seed_name "$BATCH" Driver 1)"
