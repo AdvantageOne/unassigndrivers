@@ -229,9 +229,41 @@ line always names the tenant.
 | Lambda `Errors` / `Throttles` | The function threw, or hit concurrency limits | Read the failed invocation's log; a thrown error on the scheduled path also retries and can land in the DLQ |
 | DLQ depth ≥ 1 | A scheduled run failed enough times to be parked — most often a schedule firing for a database with **no configuration** (leftover after an offboarding), or service-account credentials in the secret that MyGeotab now rejects | Inspect the message for the payload and the reason, fix it (onboard the database, or rotate the credential with `scripts/onboard-customer.sh`), then delete the message. Delete the schedule too if the database is gone for good |
 
-Log lines are JSON and include `outcome`, `action`, `database`, `unassigned`, `skipped`, `failed`,
-`stillAssigned` and `requestId`. Query them with CloudWatch Logs Insights, for example
-`fields @timestamp, database, outcome, failed | filter outcome = "failed"`.
+### What the logs say
+
+Every invocation logs one line per stage, so a request can be followed end to end by its
+`requestId`. Authentication in particular is never silent: it is proven, and either outcome is
+recorded.
+
+| Line (`msg`) | Written when | Useful fields |
+|---|---|---|
+| `event received` | always, before anything else runs | `eventType` (`http`, `direct`, `scheduler`), `action`, `method`, `origin`, `hasSession`, `userName`, `database` |
+| `session proven` | the caller's MyGeotab session was verified with `Get User` | `database`, `userName`, `userId`, `server` |
+| `session refused` | the session was absent, expired, or belonged to no user | `outcome: "denied"`, `code: "SESSION_INVALID"`, `reason` |
+| `license checked` | the add-in asked about licensing | `domain`, `staff`, `licensed`, `onboarded`, `workerConfigured`, `setupAllowed` |
+| `action completed` | an action finished | `outcome: "ok"`, `licensed`, and `staff` for the setup action |
+| `action failed` | an action was refused or errored | `outcome` (`denied` or `failed`), `code`, `reason` |
+| `scheduled run finished` / `scheduled run failed` | a schedule fired | `outcome`, `unassigned`, `skipped`, `failed`, `stillAssigned` |
+| `service account saved from the add-in` | a staff member registered a database | `secretCreated`, `licensed`, `configUpdated`, `attempts` |
+
+Payload contents are never logged — the setup action carries a password — and neither are session
+ids or credentials.
+
+```text
+# one request, start to finish
+fields @timestamp, msg, action, outcome, code, reason
+| filter requestId = "<the request id>"
+| sort @timestamp asc
+
+# who failed to authenticate, and why
+fields @timestamp, userName, database, reason | filter msg = "session refused"
+
+# licensing as the add-in saw it
+fields @timestamp, database, domain, staff, licensed | filter msg = "license checked"
+
+# runs that did anything other than succeed
+fields @timestamp, database, outcome, failed, stillAssigned | filter msg like /scheduled run/
+```
 
 ## 8. Break-glass and rollback
 

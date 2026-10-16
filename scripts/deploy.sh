@@ -275,6 +275,17 @@ JSON
   st_false "nothing hands the plan file straight to jq" \
            grep -nE 'jq[^|]*"\$PLAN_PATH"' "$SCRIPT_DIR/deploy.sh"
 
+  # The health check has to understand both response shapes a direct invoke can
+  # return; getting this wrong turns a healthy deployment into a warning.
+  st_eq "health: an HTTP envelope with a good body" "ok: ok advone-ca-central" \
+        "$(health_result '{"statusCode":200,"headers":{},"body":"{\"ok\":true,\"data\":{\"status\":\"ok\",\"deployment\":\"advone-ca-central\"}}"}')"
+  st_eq "health: a bare result is accepted too" "ok: ok advone-ca-central" \
+        "$(health_result '{"ok":true,"data":{"status":"ok","deployment":"advone-ca-central"}}')"
+  st_eq "health: an error envelope is reported by code" "bad: LICENSE_REQUIRED This database is not licensed." \
+        "$(health_result '{"statusCode":403,"body":"{\"ok\":false,\"error\":{\"code\":\"LICENSE_REQUIRED\",\"message\":\"This database is not licensed.\"}}"}')"
+  st_eq "health: an unreadable response is reported" "bad: unreadable response" "$(health_result 'not json')"
+  st_eq "health: an empty response is reported" "bad: unreadable response" "$(health_result '')"
+
   # Header parsing for the CORS preflight check, whose remaining logic needs AWS.
   local hdr="$PLAN_DIR/selftest-headers.txt"
   printf '%s\r\n' 'HTTP/2 200' 'access-control-allow-origin: https://my.geotab.com' 'access-control-allow-methods: POST' 'content-type: application/json' > "$hdr"
@@ -736,8 +747,27 @@ smoke_test_cors() { # <function-name> <function-url>
   fi
 }
 
+# health_result <response json> -> "ok: <status> <deployment>" or "bad: <code> <message>".
+#
+# A direct invoke returns whatever the handler returned, which for the request
+# path is the HTTP envelope ({statusCode, headers, body}) and for a bare result
+# is the result itself. Both shapes are accepted.
+health_result() {
+  local response="${1:-}"
+  # jq treats empty input as an empty stream and exits 0, so guard it here.
+  if [ -z "$response" ]; then
+    printf 'bad: unreadable response'
+    return 0
+  fi
+  printf '%s' "$response" | jq -r '
+    (if (.body | type) == "string" then (.body | fromjson) else . end) as $inner
+    | if $inner.ok == true then "ok: " + ($inner.data.status // "?") + " " + ($inner.data.deployment // "")
+      else "bad: " + ($inner.error.code // "unknown") + " " + ($inner.error.message // "") end
+  ' 2>/dev/null || printf 'bad: unreadable response'
+}
+
 smoke_test() { # <function-name>
-  local fn="$1" out rc body
+  local fn="$1" out rc body result
   out="$(mktemp "${TMPDIR:-/tmp}/unassign-health.XXXXXX")"
   info "smoke test: invoking $fn with {\"action\":\"health\"}"
   rc=0
@@ -749,14 +779,19 @@ smoke_test() { # <function-name>
     hint "check the function name and logs: aws logs tail /aws/lambda/$fn --region $AWS_REGION --since 10m"
     return 0
   fi
-  body="$(head -c 2000 "$out" 2>/dev/null || true)"
+  body="$(head -c 4000 "$out" 2>/dev/null || true)"
   rm -f "$out"
-  if printf '%s' "$body" | jq -e '.ok == true' >/dev/null 2>&1; then
-    ok "health: $(printf '%s' "$body" | jq -c '.')"
-  else
-    warn "the health action answered: $(printf '%s' "$body" | head -c 400)"
-    hint "see the logs: aws logs tail /aws/lambda/$fn --region $AWS_REGION --since 10m"
-  fi
+  result="$(health_result "$body")"
+  case "$result" in
+    ok:*)
+      ok "health: $result"
+      ;;
+    *)
+      warn "the health action answered: $result"
+      warn "raw: $(printf '%s' "$body" | head -c 400)"
+      hint "see the logs: aws logs tail /aws/lambda/$fn --region $AWS_REGION --since 10m"
+      ;;
+  esac
 }
 
 cleanup() {

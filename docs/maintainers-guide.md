@@ -224,10 +224,13 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 15. **The setup panel writes twice, in this order:** Secrets Manager first, then the config record.
     Reversing it would leave a database pointing at a secret that does not exist, which breaks every
     scheduled run. It also verifies the credentials against MyGeotab before either write.
-16. **Offline green does not mean the call site is covered.** Two deploy-script bugs (the binary
-    plan file fed to jq, the artifact check killed by `pipefail`) passed every selftest because the
-    *function* was exercised and its caller was not. When you change an argument or a contract, add
-    an assertion on the call site.
+16. **Offline green does not mean the call site is covered.** Three bugs so far have passed the whole
+    suite and failed in production for the same reason — the *function* was tested, its caller was
+    not: the deploy script's plan file fed to jq, the artifact check killed by `pipefail`, and the
+    worst of them, `buildDeps` handing the config store an option called `loader` while it reads
+    `options.load`, which broke every request with `INTERNAL: options.load is not a function`. When
+    you change an argument, an option name or a contract, assert on the call site: `test/deps.test.js`
+    exists for exactly that, building the real dependencies and *using* each one.
 
 ## 8. What is verified, and what is not
 
