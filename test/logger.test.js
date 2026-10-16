@@ -48,6 +48,24 @@ test("credentials are redacted by field name, at any depth", () => {
   assert.equal(JSON.stringify(line).includes("secret-session"), false);
 });
 
+test("a session flag survives redaction, a session value does not", () => {
+  const { logger, lines } = capture();
+  logger.info("event received", {
+    hasSession: false,
+    sessionPresent: true,
+    sessionCount: 0,
+    session: { userName: "a@b.c", sessionId: "secret-session" },
+    sessionId: "secret-session"
+  });
+
+  assert.equal(lines[0].hasSession, false, "a boolean flag is metadata, not a credential");
+  assert.equal(lines[0].sessionPresent, true);
+  assert.equal(lines[0].sessionCount, 0);
+  assert.equal(lines[0].session, "[redacted]");
+  assert.equal(lines[0].sessionId, "[redacted]");
+  assert.equal(JSON.stringify(lines[0]).includes("secret-session"), false);
+});
+
 test("errors keep their message and code without a stack", () => {
   const { logger, lines } = capture();
   const error = new Error("boom");

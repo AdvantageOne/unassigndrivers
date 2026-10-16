@@ -45,6 +45,19 @@ async function checkLicense(context) {
   const caller = licensing.isStaff(session.userName, settings);
   const state = licensing.readLicense(context.config, session.database);
 
+  if (context.logger) {
+    context.logger.info("license checked", {
+      database: session.database,
+      userName: session.userName,
+      domain: caller.domain || null,
+      staff: caller.staff,
+      licensed: state.licensed,
+      onboarded: state.onboarded,
+      workerConfigured: state.workerConfigured,
+      setupAllowed: caller.staff
+    });
+  }
+
   return {
     database: session.database,
     userName: session.userName,

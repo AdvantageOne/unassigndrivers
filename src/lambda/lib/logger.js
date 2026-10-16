@@ -27,7 +27,11 @@ function redact(value, depth) {
   if (value instanceof Error) return { name: value.name, message: value.message };
   const out = {};
   for (const [key, item] of Object.entries(value)) {
-    out[key] = SECRET_KEY.test(key) ? "[redacted]" : redact(item, depth + 1);
+    // A sensitive-looking key with a boolean or a number cannot be carrying a
+    // credential, and those flags are exactly what an operator needs to read
+    // (`hasSession: false` says the add-in never sent one).
+    const scalar = typeof item === "boolean" || typeof item === "number" || item === null;
+    out[key] = SECRET_KEY.test(key) && !scalar ? "[redacted]" : redact(item, depth + 1);
   }
   return out;
 }

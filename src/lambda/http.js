@@ -43,16 +43,32 @@ function decodeJsonBody(event) {
   }
 }
 
-/** Distinguishes a browser request from an EventBridge Scheduler invocation. */
+/**
+ * Classifies the invocation. Three shapes arrive here:
+ *
+ *   http       a request through the Function URL (has requestContext.http)
+ *   scheduler  an EventBridge Scheduler invocation — the schedule's Input payload,
+ *              which always carries `source: "scheduler"`
+ *   direct     `aws lambda invoke` (the deploy script's health smoke test, a
+ *              manual check). It has no requestContext and is not a schedule, so
+ *              it is handled like a request without an Origin header rather than
+ *              being mistaken for a schedule payload.
+ */
 function parseEvent(event) {
   const request = event && event.requestContext && event.requestContext.http;
-  if (!request) return { kind: "scheduler", payload: event || {} };
-  return {
-    kind: "http",
-    method: (request.method || "POST").toUpperCase(),
-    origin: header(event, "origin"),
-    body: decodeJsonBody(event)
-  };
+  if (request) {
+    return {
+      kind: "http",
+      method: (request.method || "POST").toUpperCase(),
+      origin: header(event, "origin"),
+      body: decodeJsonBody(event)
+    };
+  }
+  const payload = event || {};
+  if (payload.source === "scheduler") {
+    return { kind: "scheduler", payload, body: payload, method: "POST", origin: null };
+  }
+  return { kind: "direct", payload, body: payload, method: "POST", origin: null };
 }
 
 /**

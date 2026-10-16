@@ -89,7 +89,23 @@ function pickGroup(result, groupId) {
  * @returns {Promise<{session, client, user}>}
  */
 async function proveSession(context) {
-  const session = requireSession(context.session);
+  const logger = context.logger;
+  let session;
+  try {
+    session = requireSession(context.session);
+  } catch (error) {
+    if (logger) {
+      logger.warn("session refused", {
+        outcome: "denied",
+        code: "SESSION_INVALID",
+        reason: error.message,
+        database: (context.session && context.session.database) || null,
+        userName: (context.session && context.session.userName) || null
+      });
+    }
+    throw error;
+  }
+
   const client = context.geotab.session({
     database: session.database,
     userName: session.userName,
@@ -105,9 +121,40 @@ async function proveSession(context) {
     });
     user = Array.isArray(users) ? users[0] : users;
   } catch (error) {
+    // The session is the credential for everything; say plainly when it fails.
+    if (logger) {
+      logger.warn("session refused", {
+        outcome: "denied",
+        code: "SESSION_INVALID",
+        database: session.database,
+        userName: session.userName,
+        server: client.server,
+        reason: error.message
+      });
+    }
     throw appError("SESSION_INVALID", `MyGeotab rejected the session: ${error.message}`);
   }
-  if (!user) throw appError("SESSION_INVALID", `MyGeotab has no user named "${session.userName}".`);
+  if (!user) {
+    if (logger) {
+      logger.warn("session refused", {
+        outcome: "denied",
+        code: "SESSION_INVALID",
+        database: session.database,
+        userName: session.userName,
+        server: client.server,
+        reason: "MyGeotab has no user with that name"
+      });
+    }
+    throw appError("SESSION_INVALID", `MyGeotab has no user named "${session.userName}".`);
+  }
+  if (logger) {
+    logger.info("session proven", {
+      database: session.database,
+      userName: session.userName,
+      userId: user.id || null,
+      server: client.server
+    });
+  }
   return { session, client, user };
 }
 

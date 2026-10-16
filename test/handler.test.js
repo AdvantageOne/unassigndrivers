@@ -412,7 +412,9 @@ test("the license action still refuses an unproven session", async () => {
   const response = await handleEvent(httpEvent("license"), context, deps);
   assert.equal(response.statusCode, 401);
   assert.equal(body(response).error.code, "SESSION_INVALID");
-  assert.deepEqual(outcomes(lines), ["denied"]);
+  // Both the authentication attempt and the request outcome are logged.
+  assert.ok(lines.some((line) => line.msg === "session refused" && line.outcome === "denied"));
+  assert.ok(lines.some((line) => line.msg === "action failed" && line.outcome === "denied"));
 });
 
 test("the staff setup still refuses an unproven session", async () => {
@@ -435,6 +437,105 @@ test("a schedule that was deleted before it fired is skipped", async () => {
   assert.equal(response.statusCode, 200);
   assert.equal(JSON.parse(response.body).skipped, "NOT_FOUND");
   assert.equal(state.behaviour.addedChanges.length, 0);
+});
+
+/* ---------------- direct invokes (the deploy smoke test, manual checks) ---------------- */
+
+test("a direct health invoke is answered, not mistaken for a schedule", async () => {
+  const { deps, context, lines } = harness();
+  const response = await handleEvent({ action: "health" }, context, deps);
+
+  assert.equal(response.statusCode, 200, "a direct invoke must not raise 'Unrecognized scheduler payload'");
+  assert.equal(body(response).data.status, "ok");
+  assert.equal(lines[0].msg, "event received");
+  assert.equal(lines[0].eventType, "direct");
+  assert.equal(lines[0].action, "health");
+  assert.equal(lines[0].hasSession, false);
+});
+
+test("a direct invoke of a session action still needs a session", async () => {
+  const { deps, context } = harness();
+  const response = await handleEvent({ action: "license" }, context, deps);
+  assert.equal(response.statusCode, 401);
+  assert.equal(body(response).error.code, "SESSION_INVALID");
+});
+
+test("a direct invoke carries a session like any other request", async () => {
+  const { deps, context, lines } = harness();
+  const response = await handleEvent(
+    { action: "license", session: { database: "tenant_a", userName: "admin@example.com", sessionId: "s-1" } },
+    context,
+    deps
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(body(response).data.licensed, true);
+  assert.ok(lines.some((line) => line.msg === "session proven"), "the session proof is logged");
+  assert.ok(lines.some((line) => line.msg === "license checked" && line.staff === false));
+});
+
+test("only a scheduler payload goes down the schedule path", async () => {
+  const { deps, context, lines } = harness();
+  // Shaped like a schedule payload but without `source: "scheduler"`, so it is a
+  // direct request: it needs a session instead of being read as a schedule.
+  const response = await handleEvent({ action: "unassign", geotab_database: "tenant_a" }, context, deps);
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(body(response).error.code, "SESSION_INVALID");
+  assert.equal(lines[0].eventType, "direct");
+});
+
+test("a payload with an unknown action is a clear 400, not a schedule error", async () => {
+  const { deps, context } = harness();
+  const response = await handleEvent({ action: "teleport" }, context, deps);
+  assert.equal(response.statusCode, 400);
+  assert.match(body(response).error.message, /Unknown action "teleport"/);
+});
+
+/* ---------------- event and session logging ---------------- */
+
+test("every invocation logs what arrived, with its type and session state", async () => {
+  const { deps, context, lines } = harness();
+  await handleEvent(httpEvent("health", { session: null }), context, deps);
+  await handleEvent(httpEvent("listSchedules"), context, deps);
+  await handleEvent(scheduledEvent(), context, deps);
+
+  const received = lines.filter((line) => line.msg === "event received");
+  assert.equal(received.length, 3);
+  assert.deepEqual(received.map((line) => line.eventType), ["http", "http", "scheduler"]);
+  assert.equal(received[0].hasSession, false);
+  assert.equal(received[1].hasSession, true);
+  assert.equal(received[1].userName, "admin@example.com");
+  assert.equal(received[1].database, "tenant_a");
+  assert.equal(received[2].action, "unassign");
+  assert.equal(received[2].database, "tenant_a");
+});
+
+test("a refused session is logged as refused, with the reason", async () => {
+  const { deps, context, lines } = harness({ users: [] });
+  await handleEvent(httpEvent("license"), context, deps);
+
+  const refused = lines.find((line) => line.msg === "session refused");
+  assert.equal(refused.outcome, "denied");
+  assert.equal(refused.code, "SESSION_INVALID");
+  assert.equal(refused.userName, "admin@example.com");
+  assert.match(refused.reason, /no user with that name/);
+});
+
+test("no log line ever contains a session id or a password", async () => {
+  const { deps, context, lines } = harness();
+  await handleEvent(
+    httpEvent("saveWorkerCredentials", {
+      session: { database: "tenant_a", userName: STAFF, sessionId: "super-secret-session", server: "my.geotab.test" },
+      payload: { workerUserName: "svc@customer.com", workerPassword: "hunter2-not-in-logs" }
+    }),
+    context,
+    deps
+  );
+
+  const all = JSON.stringify(lines);
+  assert.equal(all.includes("super-secret-session"), false, "the session id must never be logged");
+  assert.equal(all.includes("hunter2-not-in-logs"), false, "the password must never be logged");
 });
 
 /* ---------------- licensing ---------------- */
@@ -569,7 +670,12 @@ test("a deployment can stop enforcing licences without a code change", async () 
 
 test("a broken payload or a broken secret fails the invocation so EventBridge retries", async () => {
   const { deps, context } = harness();
-  await assert.rejects(() => handleEvent({ action: "unassign" }, context, deps), /Unrecognized scheduler payload/);
+  // Only a payload that claims to come from the Scheduler is held to the schedule
+  // contract; anything else is a direct request and gets a request-shaped answer.
+  await assert.rejects(
+    () => handleEvent(Object.assign(scheduledEvent(), { action: "teleport" }), context, deps),
+    /Unrecognized scheduler payload/
+  );
   await assert.rejects(() => handleEvent(scheduledEvent({ geotab_database: null }), context, deps), /no geotab_database/);
 
   const broken = harness({

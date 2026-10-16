@@ -93,7 +93,10 @@ function buildDeps(options) {
   const configStore =
     overrides.configStore ||
     createConfigStore({
-      loader: overrides.loadConfig || require("./aws").createConfigLoader({ bucket: env.configBucket, key: env.configKey, region: env.region }),
+      // The option is `load` (see lib/config-store.js); naming it anything else
+      // makes every config read fail with "options.load is not a function",
+      // which is a 500 for the whole add-in.
+      load: overrides.loadConfig || require("./aws").createConfigLoader({ bucket: env.configBucket, key: env.configKey, region: env.region }),
       ttlMs: env.configCacheMs,
       logger
     });
@@ -334,6 +337,27 @@ async function handleScheduled(payload, deps, requestId) {
 async function handleEvent(event, context, deps) {
   const requestId = (context && (context.awsRequestId || context.requestId)) || "local";
   const parsed = http.parseEvent(event);
+  const body = parsed.body || {};
+  const session = body.session || null;
+
+  // One line per invocation, before anything else happens, so the log always
+  // shows what arrived even when the request never gets further. Payload
+  // contents are never logged: `saveWorkerCredentials` carries a password.
+  deps.logger.info("event received", {
+    eventType: parsed.kind,
+    action: body.action || (parsed.kind === "scheduler" ? "unassign" : null),
+    method: parsed.method,
+    origin: parsed.origin || null,
+    hasSession: Boolean(session),
+    userName: session ? session.userName : null,
+    database: session ? session.database : body.geotab_database || null,
+    requestId
+  });
+
+  if (parsed.kind === "scheduler") {
+    return handleScheduled(parsed.payload, deps, requestId);
+  }
+
   if (parsed.kind === "http") {
     if (parsed.method === "OPTIONS") return http.preflight(parsed.origin, deps.env.allowedOrigins);
     if (parsed.method !== "POST") {
@@ -345,7 +369,11 @@ async function handleEvent(event, context, deps) {
     }
     return handleHttp(parsed, deps, requestId);
   }
-  return handleScheduled(parsed.payload, deps, requestId);
+
+  // A direct invoke (the deploy script's health smoke test, a manual check) is
+  // handled like a request without an Origin header. It still needs a session
+  // for anything that is not public, and only IAM principals can invoke it.
+  return handleHttp(parsed, deps, requestId);
 }
 
 async function handler(event, context) {
