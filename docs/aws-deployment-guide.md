@@ -245,6 +245,29 @@ scripts/offboard-customer.sh --region ca --delete-secret
 | Turn off one tenant in an emergency | Set `customers.<db>.enabled = false` in the config; or `aws scheduler update-schedule … --state DISABLED` per schedule; or delete the tenant's schedule group |
 | Rotate a customer's password | Change it in MyGeotab, then re-run `scripts/onboard-customer.sh` for that database (it updates the secret in place) |
 | Delete a tenant's schedules | Add-in **Delete** per row, or `aws scheduler delete-schedule --name <n> --group-name UnassignDriverSchedules-<db>` |
+| Prove clearing works in a database | `scripts/seed-test-fleet.sh` (below), then a run, then the add-in's Run history |
+
+### Proving a database clears for real
+
+`scripts/seed-test-fleet.sh` puts a test fleet into one MyGeotab database and assigns it: 10 drivers
+(`Add User`, `isDriver: true`), 10 assets (`Add Device`) and 10 assignments (`Add DriverChange` —
+MyGeotab has no assignment endpoint, and that is the same record the service writes to clear one). It
+needs a user with **Administrator** clearance, reads its password from the terminal (never from an
+argument), and refuses to write until the database name is typed back:
+
+```bash
+scripts/seed-test-fleet.sh --database advone_matt_dev1 --user matt@example.com   # seed
+#   … then run the schedule (add-in "Unassign All Now", or wait for the slot) …
+scripts/seed-test-fleet.sh --database advone_matt_dev1 --user matt@example.com --cleanup
+```
+
+Everything it creates is named `A1SEED-<stamp>-…`, so a batch is identifiable and `--cleanup` removes
+exactly that. After seeding, the add-in's **Preview** should list those 10 assets with drivers, and
+**Run history** after a run should report 10 unassigned (and 0 failed) — if it reports
+`stillAssigned`, something is re-asserting the driver (see the alarms table).
+
+It talks to MyGeotab directly, so it works with or without a deployment (`--server` for regional
+hosts); `--dry-run` signs in, prints what it would create and writes nothing.
 
 ## 7. Alarms
 

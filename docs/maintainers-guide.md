@@ -59,9 +59,10 @@ Everything else in the HTML (markup, styles, the UI script) is hand-edited as be
 | `test/` | tests | `pnpm test`; fakes live in `test/support/fakes.js` |
 | `infra/modules/unassign` | IaC | Lambda, IAM, Function URL, config bucket, DLQ, SNS, alarms, metric filters |
 | `infra/live/{ca,us}` | IaC | Thin roots: region + names only |
-| `scripts/` | tooling | `deploy.sh`, `onboard-customer.sh`, `offboard-customer.sh`, shared `lib/common.sh` |
+| `scripts/` | tooling | `deploy.sh`, `onboard-customer.sh`, `offboard-customer.sh`, `seed-test-fleet.sh`, shared `lib/common.sh` |
 | `scheduled-unassign.yml`, `.github/workflows/` (removed at cutover) | deleted | The old trigger; see §6 |
 | `config.json` | published | Add-in configuration (jsDelivr tag + version) |
+| `config.ca.json`, `config.us.json` | published | One per region: the configuration an operator pastes, pointing at that region's published page |
 
 ## 4. How the two paths work
 
@@ -156,6 +157,13 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 **Onboard, rotate or offboard a tenant**
 `scripts/onboard-customer.sh`, `offboard-customer.sh`; both have `--dry-run`/`--selftest`, and
 `scripts/deploy.sh --selftest` covers the pure helpers of all three.
+
+**Prove a tenant's clearing actually clears**
+`scripts/seed-test-fleet.sh` writes a test fleet and its assignments straight to MyGeotab (10
+drivers, 10 assets, 10 `DriverChange` assignments), then reads the assignments back the way the
+service does. It is the only script that needs a MyGeotab password rather than the service account,
+it types the database name back before writing, and `--cleanup` removes the batch
+(`A1SEED-<stamp>-…`). See the deployment guide, "Proving a database clears for real".
 
 ## 6. Still legacy, and how to finish it
 
@@ -255,7 +263,7 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
 ## 9. Running things locally
 
 ```bash
-pnpm test                              # 102 tests, offline
+pnpm test                              # 184 tests, offline
 pnpm run build:addin                   # regenerate the add-in's generated regions
 pnpm run check:addin                   # fail if the add-in is stale
 tofu fmt -check -recursive infra && (cd infra/live/ca && tofu validate)

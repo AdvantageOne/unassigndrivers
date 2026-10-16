@@ -66,6 +66,8 @@ and the bucket setup behind them.
 scripts/deploy.sh                 # asks: Canada (ca-central-1) or United States (us-east-2)
 scripts/onboard-customer.sh       # register a Geotab database with the scheduler
 scripts/offboard-customer.sh      # disable one, keeping its run history
+scripts/seed-test-fleet.sh        # add 10 drivers + 10 assets + 10 assignments to one
+                                  # database, to prove a run clears real assignments
 ```
 
 Deployment requires only an AWS CLI login and OpenTofu 1.10+; the scripts own every other detail
