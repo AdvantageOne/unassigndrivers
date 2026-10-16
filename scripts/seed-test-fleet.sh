@@ -270,6 +270,15 @@ seed_driverchange_search_json() { # <device id> <from iso8601>
     '{typeName: "DriverChange", search: {deviceSearch: {id: $device}, fromDate: $from, includeOverlappedChanges: true}}'
 }
 
+# The same search as a request: every call but Authenticate has to carry the
+# session, or MyGeotab answers "-32000: The Credentials object is missing or
+# empty" — which is how one read of the assignment slipped through while the
+# writes, which do carry it, worked.
+seed_driverchange_params() { # <device id> <from iso8601> [<credentials json>]
+  jq -n --argjson credentials "${3:-{\}}" --argjson search "$(seed_driverchange_search_json "${1:-}" "${2:-}")" \
+    '{credentials: $credentials} + $search'
+}
+
 # The new id out of an Add's answer. MyGeotab answers [{id}] for a single Add and
 # the bare id on some paths, so every shape is accepted rather than guessed at.
 # The first id is picked inside jq on purpose: `… | head -1` races the writer,
@@ -525,7 +534,7 @@ verify_assignments() { # <driver ids> <device ids> -> "index<TAB>driverId<TAB>ex
   local driver_list; driver_list="$(printf '%s\n' "$drivers")"
   while read -r device; do
     [ -n "$device" ] || continue
-    changes="$(rpc_result "Get" "$(seed_driverchange_search_json "$device" "$SEED_FROM")" "the assignment on asset $device")" || return 1
+    changes="$(rpc_result "Get" "$(seed_driverchange_params "$device" "$SEED_FROM" "$CREDENTIALS")" "the assignment on asset $device")" || return 1
     latest="$(printf '%s' "$changes" | jq -r 'sort_by(.dateTime) | last | .driver.id // "none"')"
     got="$(printf '%s\n' "$driver_list" | sed -n "$((index + 1))p")"
     printf '%s\t%s\t%s\n' "$index" "$latest" "$got"
@@ -719,6 +728,15 @@ run_selftest() {
   st_eq "an assignment names the driver" "b2" "$(printf '%s' "$change" | jq -r .driver.id)"
   st_eq "an assignment carries the Driver type the service writes" "Driver" "$(printf '%s' "$change" | jq -r .type)"
   st_eq "an assignment is stamped" "2026-10-16T13:30:00.000Z" "$(printf '%s' "$change" | jq -r .dateTime)"
+  # The request form of it: the same search, plus the session. Without the
+  # session MyGeotab refuses the call itself.
+  local params
+  params="$(seed_driverchange_params "b1" "2026-10-16T13:30:00.000Z" '{"sessionId":"s1","database":"db"}')"
+  st_eq "the read carries the session" "s1" "$(printf '%s' "$params" | jq -r .credentials.sessionId)"
+  st_eq "and still asks for DriverChange" "DriverChange" "$(printf '%s' "$params" | jq -r .typeName)"
+  st_eq "and still bounds it to this device" "b1" "$(printf '%s' "$params" | jq -r .search.deviceSearch.id)"
+  st_eq "with no session given the key is still present" "true" \
+        "$(printf '%s' "$(seed_driverchange_params "b1" "2026-10-16T13:30:00.000Z")" | jq -r 'has("credentials")')"
   search="$(seed_driverchange_search_json "b1" "2026-10-16T13:30:00.000Z")"
   st_eq "the read asks for DriverChange" "DriverChange" "$(printf '%s' "$search" | jq -r .typeName)"
   st_eq "the read bounds the search to this device" "b1" "$(printf '%s' "$search" | jq -r .search.deviceSearch.id)"
