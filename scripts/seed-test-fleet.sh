@@ -42,14 +42,15 @@ ADMIN_GROUP_ID="GroupEverythingSecurityId"
 # SecurityGroups cannot be null or empty").
 COMPANY_GROUP_ID="GroupCompanyId"
 # The built-in clearances are named Group<Role>SecurityId (this repo already
-# relies on GroupEverythingSecurityId), so the Driver one is found by shape, not
-# by a name that is translated — and whatever is chosen is checked against the
-# database's own group list before it is sent.
+# relies on GroupEverythingSecurityId), so a Driver one is found by shape, not by
+# a name that is translated. When a database does not expose one, the clearance
+# the script's own account carries is used: it is valid by construction, and the
+# seeded drivers have no password, so nobody can sign in as them.
 DRIVER_SECURITY_GROUP_PATTERN="^Group[A-Za-z]*Driver[A-Za-z]*SecurityId$"
-FALLBACK_SECURITY_GROUP_ID="GroupEverythingSecurityId"
 SECURITY_GROUP_ID=""
+SECURITY_GROUP_SOURCE=""
+CALLER_SECURITY_GROUP_IDS=""
 COMPANY_GROUP_NAME=""
-SECURITY_GROUP_NAME=""
 SEED_GROUPS="[]"
 
 usage() {
@@ -168,20 +169,41 @@ seed_group_list() { # <groups json>
   printf '%s' "${1:-}" | jq -r '[.[] | "\(.id) (\(.name))"] | join(", ")' 2>/dev/null || true
 }
 
-# The database's built-in Driver clearance, found by id shape (names are localised).
-seed_driver_security_group_id() { # <groups json>
-  printf '%s' "${1:-}" | jq -r --arg pattern "$DRIVER_SECURITY_GROUP_PATTERN" \
-    '[.[] | select((.id // "") | test($pattern)) | .id] | first // empty'
+# Every clearance id this database has shown us: the security groups Get Group
+# happens to expose, plus the ones the script's own account carries. Nothing else
+# is a safe source — an id MyGeotab does not know refuses the whole Add.
+seed_known_clearance_ids() { # <groups json> <caller's ids, newline>
+  { printf '%s' "${1:-}" | jq -r --arg pattern "$DRIVER_SECURITY_GROUP_PATTERN" \
+      '.[] | select((.id // "") | test("^Group[A-Za-z]*SecurityId$")) | .id' 2>/dev/null
+    printf '%s\n' "${2:-}"
+  } | grep . | sort -u
 }
 
-# The ids every driver needs: a company group to belong to, and a clearance.
-seed_group_ids() { # <groups json> <requested security group> -> "company<TAB>security"
-  local groups="${1:-}" requested="${2:-}" company security
-  company="$COMPANY_GROUP_ID"
-  security="$requested"
-  [ -n "$security" ] || security="$(seed_driver_security_group_id "$groups")"
-  [ -n "$security" ] || security="$FALLBACK_SECURITY_GROUP_ID"
-  printf '%s\t%s\n' "$company" "$security"
+# Which clearance the seeded drivers get, and where it came from:
+#   <requested>            the operator's --security-group, if the database has it
+#   a built-in Driver one  Get Group exposed it (the semantically right choice)
+#   <caller id>            this script's own clearance, valid by construction
+# 1 = nothing usable.
+seed_choose_clearance() { # <requested> <known ids newline> <caller's first id>
+  local requested="${1:-}" known="${2:-}" caller="${3:-}" driver
+  if [ -n "$requested" ]; then
+    if printf '%s\n' "$known" | grep -qx -- "$requested"; then
+      printf '%s\t--security-group\n' "$requested"
+    else
+      # MyGeotab is the authority on its own clearances and does not list them
+      # all: take the operator's id and let the Add be the judge, rather than
+      # refusing something that may well be right.
+      printf '%s\t--security-group (not one this database showed us)\n' "$requested"
+    fi
+    return 0
+  fi
+  driver="$(printf '%s\n' "$known" | grep -m1 -E "$DRIVER_SECURITY_GROUP_PATTERN" || true)"
+  if [ -n "$driver" ]; then
+    printf '%s\tthis database has a Driver clearance\n' "$driver"
+    return 0
+  fi
+  [ -n "$caller" ] || return 1
+  printf '%s\t%s\n' "$caller" "this script's own account"
 }
 
 # A driver is a User with isDriver set; only fields MyGeotab needs are sent, and
@@ -329,11 +351,16 @@ authenticate() {
   fi
   CREDENTIALS="$credentials"
 
-  # Who MyGeotab thinks we are, and whether that is enough for the writes.
+  # Who MyGeotab thinks we are, and whether that is enough for the writes. The
+  # caller's own securityGroups matter twice over: they say what clearance this
+  # account has, and they are a clearance id this database certainly has (Get
+  # Group does not expose security groups — a live run returned only company
+  # groups — so a user record is the reliable source).
   local me groups
   me="$(rpc_result "Get" "$(jq -n --argjson credentials "$CREDENTIALS" --arg name "$USER_NAME" \
         '{credentials: $credentials, typeName: "User", search: {name: $name}}')")"
-  groups="$(printf '%s' "$me" | jq -r '.[0].securityGroups[]?.id // empty' | paste -sd, -)"
+  CALLER_SECURITY_GROUP_IDS="$(printf '%s' "$me" | jq -r '.[0].securityGroups[]?.id // empty')"
+  groups="$(printf '%s\n' "$CALLER_SECURITY_GROUP_IDS" | paste -sd, -)"
   if printf '%s' "$groups" | grep -q "$ADMIN_GROUP_ID"; then
     MYGEOTAB_IDENTITY="Administrator clearance"
   else
@@ -398,25 +425,25 @@ build_batch() {
 }
 
 # Both memberships a driver needs come from the database itself, so nothing is
-# guessed: the requested id (--security-group), else its built-in Driver
-# clearance, else the account-level one this repo already knows exists.
+# guessed: the requested id (--security-group), else a built-in Driver clearance
+# the database exposes, else the clearance this script's own account carries.
 resolve_groups() {
-  local pair
+  local known chosen caller
   SEED_GROUPS="$(get_all "Group")"
-  pair="$(seed_group_ids "$SEED_GROUPS" "$SECURITY_GROUP_ID")"
-  COMPANY_GROUP_ID="$(printf '%s' "$pair" | cut -f1)"
-  SECURITY_GROUP_ID="$(printf '%s' "$pair" | cut -f2)"
+  caller="${CALLER_SECURITY_GROUP_IDS%%$'\n'*}"
+  known="$(seed_known_clearance_ids "$SEED_GROUPS" "$CALLER_SECURITY_GROUP_IDS")"
   if ! seed_group_exists "$SEED_GROUPS" "$COMPANY_GROUP_ID"; then
     die_fix "$DATABASE has no group '$COMPANY_GROUP_ID', so a driver would be refused" \
             "this database's groups are: $(seed_group_list "$SEED_GROUPS")"
   fi
-  if ! seed_group_exists "$SEED_GROUPS" "$SECURITY_GROUP_ID"; then
-    die_fix "$DATABASE has no group '$SECURITY_GROUP_ID' to use as the drivers' clearance" \
-            "pass --security-group <id>; this database's groups are: $(seed_group_list "$SEED_GROUPS")"
+  if ! chosen="$(seed_choose_clearance "$SECURITY_GROUP_ID" "$known" "$caller")"; then
+    die_fix "no clearance id in $DATABASE could be used for the seeded drivers" \
+            "pass --security-group <id>; clearances seen in this database: $(printf '%s\n' "$known" | paste -sd, -)"
   fi
+  SECURITY_GROUP_ID="$(printf '%s' "$chosen" | cut -f1)"
+  SECURITY_GROUP_SOURCE="$(printf '%s' "$chosen" | cut -f2)"
   COMPANY_GROUP_NAME="$(seed_group_name "$SEED_GROUPS" "$COMPANY_GROUP_ID")"
-  SECURITY_GROUP_NAME="$(seed_group_name "$SEED_GROUPS" "$SECURITY_GROUP_ID")"
-  ok "drivers get the '$SECURITY_GROUP_NAME' clearance ($SECURITY_GROUP_ID)"
+  ok "drivers get the clearance $SECURITY_GROUP_ID (from $SECURITY_GROUP_SOURCE)"
   info "records belong to the '$COMPANY_GROUP_NAME' group ($COMPANY_GROUP_ID)"
 }
 
@@ -565,21 +592,34 @@ run_selftest() {
     {"id":"GroupDriverSecurityId","name":"Driver"},
     {"id":"b42","name":"Drivers - Toronto"}
   ]'
-  st_eq "the built-in Driver clearance is found by id shape" "GroupDriverSecurityId" \
-        "$(seed_driver_security_group_id "$groups")"
-  st_eq "a database without one has no answer, rather than a guess" "" \
-        "$(seed_driver_security_group_id '[{"id":"b42","name":"Drivers"}]')"
   st_true "an id in the database is accepted" seed_group_exists "$groups" "GroupCompanyId"
   st_false "an id that is not there is refused" seed_group_exists "$groups" "GroupNopeSecurityId"
-  st_eq "the company group goes with the discovered clearance" "GroupCompanyId:GroupDriverSecurityId" \
-        "$(seed_group_ids "$groups" "" | tr '\t' ':')"
-  st_eq "an explicit --security-group wins" "GroupCompanyId:GroupEverythingSecurityId" \
-        "$(seed_group_ids "$groups" "GroupEverythingSecurityId" | tr '\t' ':')"
-  st_eq "a database with only account-level groups falls back to that one" \
-        "GroupCompanyId:GroupEverythingSecurityId" \
-        "$(seed_group_ids '[{"id":"GroupCompanyId","name":"Company Group"},{"id":"GroupEverythingSecurityId","name":"Everything"}]' "" | tr '\t' ':')"
   st_eq "the group list names what is there" "GroupCompanyId (Company Group), GroupDriverSecurityId (Driver)" \
         "$(seed_group_list '[{"id":"GroupCompanyId","name":"Company Group"},{"id":"GroupDriverSecurityId","name":"Driver"}]')"
+
+  # Which clearance the drivers get. Get Group does not always expose security
+  # groups (a live database returned only company groups), so the clearance the
+  # script's own account carries is the fallback — an id that database certainly
+  # has, because MyGeotab handed it over with the session.
+  local known_driver="GroupDriverSecurityId"$'\n'"GroupEverythingSecurityId"$'\n'
+  local known_company_only="GroupEverythingSecurityId"$'\n'
+  st_eq "a built-in Driver clearance is preferred when the database exposes one" \
+        "GroupDriverSecurityId:this database has a Driver clearance" \
+        "$(seed_choose_clearance "" "$known_driver" "GroupEverythingSecurityId" | tr '\t' ':')"
+  st_eq "otherwise the script's own clearance is used" \
+        "GroupEverythingSecurityId:this script's own account" \
+        "$(seed_choose_clearance "" "$known_company_only" "GroupEverythingSecurityId" | tr '\t' ':')"
+  st_eq "an explicit --security-group wins when the database has it" \
+        "GroupEverythingSecurityId:--security-group" \
+        "$(seed_choose_clearance "GroupEverythingSecurityId" "$known_driver" "GroupEverythingSecurityId" | tr '\t' ':')"
+  st_eq "an explicit id the database did not show is still used, and says so" \
+        "GroupCustomSecurityId:--security-group (not one this database showed us)" \
+        "$(seed_choose_clearance "GroupCustomSecurityId" "$known_driver" "GroupEverythingSecurityId" | tr '\t' ':')"
+  st_false "nothing to choose from is refused, not guessed" seed_choose_clearance "" "" ""
+  # Company groups are not clearances, so they stay out of that list.
+  st_eq "the clearances a database showed are listed once each" \
+        "GroupDriverSecurityId"$'\n'"GroupEverythingSecurityId" \
+        "$(seed_known_clearance_ids '[{"id":"GroupCompanyId","name":"Company Group"},{"id":"GroupDriverSecurityId","name":"Driver"}]' "GroupEverythingSecurityId"$'\n')"
 
   local user device change search
   user="$(seed_user_json "A1SEED-x-Driver-01" 1 "GroupCompanyId" "GroupDriverSecurityId")"
@@ -659,7 +699,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   printf '%s\n' "  database : $DATABASE"
   printf '%s\n' "  server   : $SERVER"
   printf '%s\n' "  batch    : $BATCH"
-  printf '%s\n' "  groups   : drivers in '$COMPANY_GROUP_NAME', clearance '$SECURITY_GROUP_NAME' ($SECURITY_GROUP_ID)"
+  printf '%s\n' "  groups   : drivers in '$COMPANY_GROUP_NAME'; clearance $SECURITY_GROUP_ID (from $SECURITY_GROUP_SOURCE)"
   printf '%s\n' "  would add: $COUNT drivers (Add User, isDriver: true)"
   printf '%s\n' "             $COUNT assets (Add Device)"
   printf '%s\n' "             $COUNT assignments (Add DriverChange, driver named, type Driver)"
