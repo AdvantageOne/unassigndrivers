@@ -76,6 +76,10 @@ async function claimOccurrence(context) {
 function summarise(entry) {
   return {
     at: entry.at,
+    // The occurrence this run belongs to: it is what ties the tenant's log entry
+    // to the deployment's run log, so the two must not be guessed separately.
+    occurrence: entry.occurrence || null,
+    trigger: entry.trigger || null,
     unassigned: entry.unassigned.length,
     skipped: entry.skipped.length,
     failed: entry.failed.length,

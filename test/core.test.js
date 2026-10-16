@@ -214,3 +214,39 @@ test("loadRecords finds the schedule and log written under this add-in id", asyn
   assert.equal(records.log.id, "l1");
   assert.equal(core.ADDIN_ID, ADDIN_ID);
 });
+
+test("the run history merges the tenant's log with the deployment's", async () => {
+  const tenantEntry = {
+    at: "2026-10-16T22:00:03.000Z",
+    occurrence: "2026-10-16T22:00:00.000Z",
+    trigger: "scheduled",
+    by: "Unassign Service",
+    unassigned: [{ device: "Truck 1", driver: "Test Driver 1" }],
+    skipped: [],
+    failed: [],
+    stillAssigned: []
+  };
+  const deploymentRuns = [
+    // The same run, from the deployment's side: it must not appear twice.
+    { at: "2026-10-16T22:00:03.000Z", occurrence: "2026-10-16T22:00:00.000Z", trigger: "scheduled", by: "Unassign Service", outcome: "ran", unassigned: 1 },
+    // A slot that fired and never reached Geotab: only the deployment has it.
+    { at: "2026-10-16T23:00:03.000Z", occurrence: "2026-10-16T23:00:00.000Z", trigger: "scheduled", by: "Unassign Service", outcome: "failed", code: "GEOTAB_ERROR", reason: "MyGeotab said no" }
+  ];
+
+  const merged = core.mergeRunHistory([tenantEntry], deploymentRuns);
+  assert.equal(merged.length, 2, "the duplicated run is listed once");
+  assert.equal(merged[0].occurrence, "2026-10-16T23:00:00.000Z", "newest first");
+
+  const attempted = merged[0];
+  assert.equal(attempted.source, "aws");
+  assert.equal(attempted.outcome, "failed");
+  assert.equal(attempted.note, "failed: MyGeotab said no");
+  assert.deepEqual(attempted.counts, { unassigned: 0, skipped: 0, failed: 0, stillAssigned: 0 });
+
+  const detailed = merged[1];
+  assert.equal(detailed, tenantEntry, "the tenant's entry is the one kept, rows and all");
+
+  assert.deepEqual(core.mergeRunHistory([tenantEntry], []), [tenantEntry], "no deployment runs, no change");
+  assert.deepEqual(core.mergeRunHistory([], []), []);
+  assert.equal(core.mergeRunHistory([], deploymentRuns).length, 2, "a browser that was closed still sees them");
+});

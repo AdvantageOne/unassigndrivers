@@ -34,6 +34,8 @@ module "unassign" {
   alarm_email        = var.alarm_email
   log_retention_days = var.log_retention_days
   lambda_zip_path    = var.lambda_zip_path
+  lambda_s3_bucket   = local.config_bucket
+  lambda_s3_key      = var.lambda_s3_key
   lambda_handler     = var.lambda_handler
   addin_security_id  = var.addin_security_id
 }

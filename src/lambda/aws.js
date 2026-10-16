@@ -83,6 +83,47 @@ function createConfigReadWrite(options) {
   };
 }
 
+/**
+ * The run log objects: one small JSON per database, in the same bucket as the
+ * tenant registry. A missing object is not an error here — a database with no
+ * runs yet is the normal first state, unlike the config object.
+ */
+function createRunLogStore(options) {
+  let s3;
+  function client() {
+    if (!s3) s3 = s3ClientFactory();
+    return s3;
+  }
+  return {
+    async read(key) {
+      const { GetObjectCommand } = require("@aws-sdk/client-s3");
+      try {
+        const result = await client().send(new GetObjectCommand({ Bucket: options.bucket, Key: key }));
+        return { text: await result.Body.transformToString(), etag: result.ETag || null };
+      } catch (error) {
+        const name = error && (error.name || error.code);
+        if (name === "NoSuchKey" || name === "NoSuchBucket" || name === "NotFound") {
+          return { text: null, etag: null };
+        }
+        throw error;
+      }
+    },
+    async write(key, text, etag) {
+      const { PutObjectCommand } = require("@aws-sdk/client-s3");
+      const input = {
+        Bucket: options.bucket,
+        Key: key,
+        Body: text,
+        ContentType: "application/json",
+        ServerSideEncryption: "AES256"
+      };
+      if (etag) input.IfMatch = etag;
+      const result = await client().send(new PutObjectCommand(input));
+      return { etag: result.ETag || null };
+    }
+  };
+}
+
 function createSecretPublisherAdapter() {
   let client;
   return {
@@ -137,6 +178,7 @@ function createSchedulerAdapter(options) {
 module.exports = {
   createConfigLoader,
   createConfigReadWrite,
+  createRunLogStore,
   createSecretFetcher,
   createSecretPublisherAdapter,
   createSchedulerAdapter

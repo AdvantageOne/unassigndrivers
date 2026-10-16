@@ -33,3 +33,8 @@ variable "addin_security_id" {
   type        = string
   default     = ""
 }
+variable "lambda_s3_key" {
+  description = "Key of the Lambda artifact in the config bucket. scripts/deploy.sh passes a content-addressed key."
+  type        = string
+  default     = "artifacts/lambda.zip"
+}

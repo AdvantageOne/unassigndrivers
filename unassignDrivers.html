@@ -800,6 +800,59 @@
       });
   }
 
+  /**
+   * The Run history, from both sources.
+   *
+   * `entries` are the tenant's own log — a run's detail, written by whoever ran
+   * it (this browser, or the service). `runs` are the deployment's records from
+   * AWS, which also cover attempts that never reached Geotab (a licence refusal,
+   * a database the deployment does not know, a MyGeotab outage) and confirm that
+   * a scheduled slot fired while no browser was open.
+   *
+   * The two overlap on any run the service performed, so they are merged on
+   * occurrence+trigger with the tenant's entry winning: it carries the rows.
+   * Rows that exist only in AWS carry counts and a note instead.
+   */
+  function mergeRunHistory(entries, runs) {
+    var seen = {};
+    var keyOf = function (r) { return (r.occurrence || r.at) + "|" + (r.trigger || "manual"); };
+    var out = [];
+    (entries || []).forEach(function (e) {
+      seen[keyOf(e)] = true;
+      out.push(e);
+    });
+    (runs || []).forEach(function (r) {
+      var key = keyOf(r);
+      if (seen[key]) return;
+      seen[key] = true;
+      var note = r.outcome || "ran";
+      if (r.reason) note += ": " + r.reason;
+      else if (r.code && r.code !== "OK") note += ": " + r.code;
+      out.push({
+        at: r.at,
+        trigger: r.trigger,
+        by: r.by,
+        occurrence: r.occurrence || null,
+        source: "aws",
+        outcome: r.outcome || null,
+        code: r.code || null,
+        unassigned: [],
+        skipped: [],
+        failed: [],
+        stillAssigned: [],
+        counts: {
+          unassigned: r.unassigned || 0,
+          skipped: r.skipped || 0,
+          failed: r.failed || 0,
+          stillAssigned: r.stillAssigned || 0
+        },
+        note: note
+      });
+    });
+    out.sort(function (a, b) { return Date.parse(b.at) - Date.parse(a.at); });
+    return out.slice(0, MAX_LOG_ENTRIES);
+  }
+
   var api = {
     ADDIN_ID: ADDIN_ID,
     UNKNOWN_DRIVER_ID: UNKNOWN_DRIVER_ID,
@@ -811,6 +864,7 @@
     loadRecords: loadRecords,
     saveSchedule: saveSchedule,
     appendLog: appendLog,
+    mergeRunHistory: mergeRunHistory,
     claimOccurrence: claimOccurrence,
     checkAdmin: checkAdmin,
     getAssignments: getAssignments,
@@ -988,6 +1042,9 @@
       listAssignments: function (payload) { return request("listAssignments", payload || {}); },
       license: function () { return request("license", {}); },
       saveWorkerCredentials: function (payload) { return request("saveWorkerCredentials", payload); },
+      // What the deployment itself has run for this database: confirmation that a
+      // scheduled slot fired, including attempts that never reached Geotab.
+      listRuns: function (payload) { return request("listRuns", payload); },
       health: function () { return request("health", {}); }
     };
   }
@@ -1018,6 +1075,10 @@ geotab.addin.unassignDrivers = function () {
   var api, me = null;
   var tabId = "tab-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   var records = { schedule: null, log: null };
+  // The deployment's own record of what it ran (the service's listRuns action):
+  // a scheduled slot fires with no browser open, and an attempt that never
+  // reached Geotab exists nowhere else.
+  var awsRuns = [];
   var groups = [];
   var tickTimer = null, clockTimer = null, tickCount = 0;
   var running = false, wakeLock = null, lastRows = [];
@@ -1171,9 +1232,18 @@ geotab.addin.unassignDrivers = function () {
   }
 
   function renderHistory() {
-    var entries = (records.log && records.log.details.entries) || [];
+    // Both sources: the tenant's own log (a run's detail) and the deployment's
+    // run log (scheduled runs, and attempts that never reached Geotab). One run
+    // the service performed is in both, so they are merged rather than listed
+    // twice.
+    var entries = core.mergeRunHistory((records.log && records.log.details.entries) || [], awsRuns);
     var tb = $("a1ud-history").querySelector("tbody");
     if (!entries.length) { tb.innerHTML = '<tr><td colspan="7" class="a1ud-muted">No runs yet</td></tr>'; return; }
+    // A row that exists only in the deployment's log has counts, not the rows.
+    var count = function (e, key) {
+      if (e.counts && typeof e.counts[key] === "number") return e.counts[key];
+      return (e[key] || []).length;
+    };
     tb.innerHTML = entries.map(function (e) {
       var detail = function (arr) {
         return (arr || []).map(function (r) {
@@ -1189,7 +1259,7 @@ geotab.addin.unassignDrivers = function () {
           (e.stillAssigned && e.stillAssigned.length ? "<strong>Still assigned after run</strong><br>" + detail(e.stillAssigned) : "") + "</details>"
         : (e.note ? esc(e.note) : "");
       return "<tr><td>" + esc(fmt(new Date(e.at))) + "</td><td>" + trig + "</td><td>" + esc(byLabel(e.by)) + "</td><td>" +
-        (e.unassigned || []).length + "</td><td>" + (e.skipped || []).length + "</td><td>" + ((e.failed || []).length + (e.stillAssigned || []).length) +
+        count(e, "unassigned") + "</td><td>" + count(e, "skipped") + "</td><td>" + (count(e, "failed") + count(e, "stillAssigned")) +
         "</td><td>" + body + "</td></tr>";
     }).join("");
   }
@@ -1640,7 +1710,27 @@ geotab.addin.unassignDrivers = function () {
 
   /* ---------------- scheduler ---------------- */
   function reload() {
-    return core.loadRecords(api).then(function (r) { records = r; renderHistory(); renderStatus(); });
+    return core.loadRecords(api).then(function (r) {
+      records = r;
+      renderHistory();
+      renderStatus();
+      if (!serverMode()) return null;
+      // The tenant's log is half the story: this asks the deployment what it ran,
+      // so a scheduled run shows up even though no browser was open for it, and
+      // an attempt that failed before reaching Geotab is visible at all.
+      return serverClient()
+        .listRuns({})
+        .then(function (data) {
+          awsRuns = (data && data.runs) || [];
+          renderHistory();
+        })
+        .catch(function () {
+          // Unlicensed, offline, or an older deployment without the action: the
+          // history still renders from what the tenant's own log has.
+          awsRuns = [];
+          renderHistory();
+        });
+    });
   }
 
   function tick(forceReload) {

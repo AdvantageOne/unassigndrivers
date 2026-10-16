@@ -151,6 +151,9 @@
       listAssignments: function (payload) { return request("listAssignments", payload || {}); },
       license: function () { return request("license", {}); },
       saveWorkerCredentials: function (payload) { return request("saveWorkerCredentials", payload); },
+      // What the deployment itself has run for this database: confirmation that a
+      // scheduled slot fired, including attempts that never reached Geotab.
+      listRuns: function (payload) { return request("listRuns", payload); },
       health: function () { return request("health", {}); }
     };
   }

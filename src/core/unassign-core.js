@@ -479,6 +479,59 @@
       });
   }
 
+  /**
+   * The Run history, from both sources.
+   *
+   * `entries` are the tenant's own log — a run's detail, written by whoever ran
+   * it (this browser, or the service). `runs` are the deployment's records from
+   * AWS, which also cover attempts that never reached Geotab (a licence refusal,
+   * a database the deployment does not know, a MyGeotab outage) and confirm that
+   * a scheduled slot fired while no browser was open.
+   *
+   * The two overlap on any run the service performed, so they are merged on
+   * occurrence+trigger with the tenant's entry winning: it carries the rows.
+   * Rows that exist only in AWS carry counts and a note instead.
+   */
+  function mergeRunHistory(entries, runs) {
+    var seen = {};
+    var keyOf = function (r) { return (r.occurrence || r.at) + "|" + (r.trigger || "manual"); };
+    var out = [];
+    (entries || []).forEach(function (e) {
+      seen[keyOf(e)] = true;
+      out.push(e);
+    });
+    (runs || []).forEach(function (r) {
+      var key = keyOf(r);
+      if (seen[key]) return;
+      seen[key] = true;
+      var note = r.outcome || "ran";
+      if (r.reason) note += ": " + r.reason;
+      else if (r.code && r.code !== "OK") note += ": " + r.code;
+      out.push({
+        at: r.at,
+        trigger: r.trigger,
+        by: r.by,
+        occurrence: r.occurrence || null,
+        source: "aws",
+        outcome: r.outcome || null,
+        code: r.code || null,
+        unassigned: [],
+        skipped: [],
+        failed: [],
+        stillAssigned: [],
+        counts: {
+          unassigned: r.unassigned || 0,
+          skipped: r.skipped || 0,
+          failed: r.failed || 0,
+          stillAssigned: r.stillAssigned || 0
+        },
+        note: note
+      });
+    });
+    out.sort(function (a, b) { return Date.parse(b.at) - Date.parse(a.at); });
+    return out.slice(0, MAX_LOG_ENTRIES);
+  }
+
   var api = {
     ADDIN_ID: ADDIN_ID,
     UNKNOWN_DRIVER_ID: UNKNOWN_DRIVER_ID,
@@ -490,6 +543,7 @@
     loadRecords: loadRecords,
     saveSchedule: saveSchedule,
     appendLog: appendLog,
+    mergeRunHistory: mergeRunHistory,
     claimOccurrence: claimOccurrence,
     checkAdmin: checkAdmin,
     getAssignments: getAssignments,

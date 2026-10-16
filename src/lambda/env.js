@@ -19,6 +19,9 @@ function readEnv(env) {
     region: source.AWS_REGION || "",
     configBucket: source.CONFIG_BUCKET || "",
     configKey: source.CONFIG_KEY || "config/customers.json",
+    // Where each database's run log lives (see lib/run-log.js). In the same
+    // bucket as the tenant registry, under its own prefix.
+    runLogPrefix: source.RUN_LOG_PREFIX || "runs/",
     deploymentName: source.DEPLOYMENT_NAME || "local",
     allowedOrigins: String(source.ALLOWED_ORIGINS || "")
       .split(",")

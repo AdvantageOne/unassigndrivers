@@ -25,9 +25,20 @@ variable "allowed_origins" {
 }
 
 variable "lambda_zip_path" {
-  description = "Path to the Lambda deployment artifact, relative to the root module (path.root)."
+  description = "Path to the Lambda deployment artifact, relative to the root module (path.root). Used to hash the artifact for change detection."
   type        = string
   default     = "../../../dist/lambda.zip"
+}
+
+variable "lambda_s3_bucket" {
+  description = "Bucket the deployment artifact is uploaded to. The function is deployed from S3 rather than from `filename`."
+  type        = string
+}
+
+variable "lambda_s3_key" {
+  description = "Key of the deployment artifact. scripts/deploy.sh uploads it content-addressed, so a stale object can never be deployed."
+  type        = string
+  default     = "artifacts/lambda.zip"
 }
 
 variable "lambda_handler" {

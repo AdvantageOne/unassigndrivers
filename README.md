@@ -12,6 +12,7 @@ written back to the tenant's own MyGeotab database as a run log.
 | Add-in | `unassignDrivers.html`; `scripts/deploy.sh` publishes it to the region's hosting bucket (`unassign/unassignDrivers.html`) with that region's endpoint stamped in. The repo copy and `config.json` serve the jsDelivr path |
 | Scheduling | One Lambda + EventBridge Scheduler per region: Canada `ca-central-1`, United States `us-east-2` |
 | Tenant config | `s3://<deployment>-config/config/customers.json` |
+| Run log | `s3://<deployment>-config/runs/<database>.json` — one record per run attempt the service made, which the add-in's Run history merges with the tenant's own log |
 | Credentials | One AWS Secrets Manager secret per tenant (`unassign/<database>/serviceaccount`) |
 | Deploy | `scripts/deploy.sh` (asks Canada or United States, then plans and applies) |
 | Licensing | Per database, in the deployment config. Advantage One staff can register a database and license it from the add-in's setup panel; anyone else on an unlicensed database sees a "contact your CSR" message instead of the scheduler |

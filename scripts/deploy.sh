@@ -168,6 +168,16 @@ run_selftest() {
     st_eq "region $code -> add-in hosting bucket" "$(case $code in ca) echo advone-addin-hosting-ca-central-1 ;; us) echo advone-addinhosting-us-east-2 ;; esac)" "$(region_field "$code" addin)"
   done
 
+  # The artifact is deployed from S3 under a content-addressed key, which is what
+  # keeps the provider away from the 48 KiB ceiling it inlines a local archive at.
+  st_eq "the artifact key names its content" "artifacts/lambda-abc123.zip" "$(artifact_key abc123)"
+  local digest="$PLAN_DIR/selftest-digest"
+  printf '%s' "" > "$digest"
+  st_eq "a sha256 of an empty file (known value)" "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" "$(file_sha256 "$digest")"
+  printf 'x' > "$digest"
+  st_eq "a one-byte file hashes differently" "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881" "$(file_sha256 "$digest")"
+  st_false "a missing file is reported, not hashed" file_sha256 "$PLAN_DIR/absent-artifact.zip"
+
   # The add-in page: one object per region, under this service's prefix, and the
   # endpoint stamped in at upload time so each region names its own deployment.
   st_eq "the add-in object lives under the service prefix" "unassign/unassignDrivers.html" "$(addin_object_key)"
@@ -620,6 +630,34 @@ bootstrap_state_bucket() {
 # Lambda artifact (zero runtime dependencies: the runtime provides SDK v3)
 # ---------------------------------------------------------------------------
 
+# The function is deployed from S3, under a key that names the artifact's
+# content: the same code always maps to the same key, and a changed artifact
+# always maps to a new one, so a stale object can never be deployed.
+artifact_key() { # <sha256>
+  printf 'artifacts/lambda-%s.zip\n' "${1:-}"
+}
+
+file_sha256() { # <file> -> hex digest on stdout
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+  else
+    return 1
+  fi
+}
+
+upload_lambda_artifact() { # <bucket> <key>
+  local bucket="$1" key="$2" bytes
+  bytes="$(wc -c < "$REPO_ROOT/dist/lambda.zip" | tr -d ' ')"
+  info "uploading the artifact to s3://$bucket/$key"
+  must_aws "upload the Lambda artifact" \
+           "grant s3:PutObject on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3api put-object --bucket "$bucket" --key "$key" --body "$REPO_ROOT/dist/lambda.zip" \
+           --server-side-encryption AES256 --region "$AWS_REGION"
+  ok "artifact: s3://$bucket/$key ($bytes bytes)"
+}
+
 # lambda_zip_has_handler <zip> -> 0 when the archive holds src/lambda/handler.js.
 #
 # The listing is read into a variable rather than piped into `grep -q`: greps
@@ -716,9 +754,11 @@ run_plan() {
   fi
   rc=0
   if [ "$DESTROY" -eq 1 ]; then
-    tofu -chdir="$TF_DIR" plan -destroy -input=false -out="$PLAN_PATH" || rc=$?
+    tofu -chdir="$TF_DIR" plan -destroy -input=false -out="$PLAN_PATH" \
+         -var "lambda_s3_key=$ARTIFACT_KEY" || rc=$?
   else
-    tofu -chdir="$TF_DIR" plan -input=false -out="$PLAN_PATH" || rc=$?
+    tofu -chdir="$TF_DIR" plan -input=false -out="$PLAN_PATH" \
+         -var "lambda_s3_key=$ARTIFACT_KEY" || rc=$?
   fi
   if [ "$rc" -ne 0 ] || [ ! -s "$PLAN_PATH" ]; then
     die_fix "tofu plan failed in $TF_DIR" "fix the error reported above, then re-run $SCRIPT_NAME --region $REGION_CODE"
@@ -1159,6 +1199,22 @@ if [ "$DESTROY" -eq 1 ]; then
   build_lambda_zip allow-missing
 else
   build_lambda_zip strict
+fi
+
+# The function deploys from S3, not from a local archive: the provider would
+# inline the archive as base64 in the request, and the SDK rejects a request
+# whose single line passes 64 KiB — a 48 KiB archive (issue: "decomposing
+# request: bufio.Scanner: token too long"). Uploading first has no such ceiling.
+ARTIFACT_BUCKET="$(region_field "$REGION_CODE" config)"
+if [ -s "$REPO_ROOT/dist/lambda.zip" ]; then
+  ARTIFACT_SHA="$(file_sha256 "$REPO_ROOT/dist/lambda.zip")" \
+    || die_fix "could not hash $REPO_ROOT/dist/lambda.zip" "install sha256sum or shasum, then re-run $SCRIPT_NAME --region $REGION_CODE"
+  ARTIFACT_KEY="$(artifact_key "$ARTIFACT_SHA")"
+  if [ "$DESTROY" -eq 0 ]; then
+    upload_lambda_artifact "$ARTIFACT_BUCKET" "$ARTIFACT_KEY"
+  else
+    info "destroy plan: not uploading the artifact (nothing will run it)"
+  fi
 fi
 
 check_state_keys

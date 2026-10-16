@@ -10,6 +10,12 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   partition  = data.aws_partition.current.partition
 
+  # Where each database's run log lives, in the config bucket: the Lambda writes
+  # it (lib/run-log.js) and the add-in reads it back through the listRuns action
+  # to confirm a scheduled run happened. One constant, so the IAM grant and the
+  # environment the code reads cannot drift apart.
+  run_log_prefix = "runs/"
+
   # Built from the name instead of the resource attribute so the environment
   # block does not depend on aws_lambda_function.api (that would be a cycle).
   function_arn = "arn:${local.partition}:lambda:${var.region}:${local.account_id}:function:${local.function_name}"
@@ -168,6 +174,17 @@ data "aws_iam_policy_document" "lambda" {
     effect    = "Allow"
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.config.arn}/${var.config_key}"]
+  }
+
+  # The run log: one small object per database recording every run attempt, so a
+  # scheduled run can be confirmed after the fact and an attempt that never
+  # reached Geotab is still visible. Scoped to that prefix only — the tenant
+  # registry above is a separate, narrower grant.
+  statement {
+    sid       = "ReadWriteRunLog"
+    effect    = "Allow"
+    actions   = ["s3:GetObject", "s3:PutObject"]
+    resources = ["${aws_s3_bucket.config.arn}/${local.run_log_prefix}*"]
   }
 
   statement {
@@ -331,12 +348,18 @@ resource "aws_iam_role_policy" "scheduler" {
 # ---------------------------------------------------------------------------
 
 resource "aws_lambda_function" "api" {
-  function_name    = local.function_name
-  role             = aws_iam_role.lambda.arn
-  runtime          = "nodejs22.x"
-  handler          = var.lambda_handler
-  architectures    = ["arm64"]
-  filename         = var.lambda_zip_path
+  function_name = local.function_name
+  role          = aws_iam_role.lambda.arn
+  runtime       = "nodejs22.x"
+  handler       = var.lambda_handler
+  architectures = ["arm64"]
+  # Deployed from S3, not from `filename`: the provider inlines a local archive
+  # as a base64 ZipFile, and the SDK refuses a request whose single line exceeds
+  # 64 KiB — which is a 48 KiB archive, and this service is past it. Uploading
+  # first (scripts/deploy.sh) removes the ceiling entirely. `source_code_hash`
+  # still comes from the local file, so a changed artifact is still planned.
+  s3_bucket        = var.lambda_s3_bucket
+  s3_key           = var.lambda_s3_key
   source_code_hash = filebase64sha256(var.lambda_zip_path)
   memory_size      = 256
   timeout          = 300
@@ -345,6 +368,7 @@ resource "aws_lambda_function" "api" {
     variables = {
       CONFIG_BUCKET                  = var.config_bucket_name
       CONFIG_KEY                     = var.config_key
+      RUN_LOG_PREFIX                 = local.run_log_prefix
       DEPLOYMENT_NAME                = var.deployment_name
       ALLOWED_ORIGINS                = join(",", var.allowed_origins)
       SCHEDULE_GROUP_PREFIX          = var.schedule_group_prefix

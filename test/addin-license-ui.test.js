@@ -83,7 +83,13 @@ function fakeElement(id, registry, hidden) {
         return on ? classes.add(name) : classes.delete(name);
       }
     },
-    querySelector: (selector) => registry(String(selector).replace(/^#/, "")),
+    // `#id` lookups are page-wide (that is how the add-in resolves its own
+    // elements from the root); a tag lookup belongs to the element it is made on,
+    // so the history table's tbody is not the preview table's.
+    querySelector: (selector) => {
+      const value = String(selector);
+      return value.startsWith("#") ? registry(value.slice(1)) : registry(`${id} ${value}`);
+    },
     querySelectorAll: () => [],
     addEventListener: (type, handler) => {
       counters.listeners += 1;
@@ -104,7 +110,7 @@ function fakeElement(id, registry, hidden) {
 function load(options) {
   const settings = options || {};
   const elements = new Map();
-  const calls = { license: 0, listSchedules: 0, saveWorkerCredentials: 0 };
+  const calls = { license: 0, listSchedules: 0, listRuns: 0, saveWorkerCredentials: 0 };
   const started = [];
 
   const html = addinHtml();
@@ -137,6 +143,12 @@ function load(options) {
     updateSchedule: async () => ({}),
     unassign: async () => ({ unassigned: 0, skipped: 0, failed: 0, stillAssigned: 0 }),
     listAssignments: async () => ({ rows: [] }),
+    // The deployment's own record of what it ran, merged into the history.
+    listRuns: async () => {
+      calls.listRuns += 1;
+      if (errors.listRuns) throw errors.listRuns;
+      return settings.runs || { runs: [] };
+    },
     health: async () => ({})
   };
 
@@ -346,4 +358,28 @@ test("the licence decision is re-applied when MyGeotab rebuilds the page", async
   assert.equal(h.visible("a1ud-setup-card"), true, "focus must restore the staff view");
   assert.ok(h.element("a1ud-worker-save").listeners > boundBefore, "the rebuilt controls must be rebound");
   assert.equal(h.calls.license, 2);
+});
+
+test("the run history shows what the deployment ran, with its counts", async () => {
+  const h = await start({
+    license: STAFF_REGISTERED,
+    runs: {
+      runs: [
+        { at: "2026-10-16T22:00:03.000Z", occurrence: "2026-10-16T22:00:00.000Z", trigger: "scheduled", by: "Unassign Service", outcome: "ran", unassigned: 10 },
+        { at: "2026-10-16T23:00:03.000Z", occurrence: "2026-10-16T23:00:00.000Z", trigger: "scheduled", by: "Unassign Service", outcome: "failed", code: "GEOTAB_ERROR", reason: "MyGeotab said no" }
+      ]
+    }
+  });
+
+  assert.equal(h.calls.listRuns, 1, "the add-in asks the deployment in server mode");
+  const html = h.element("a1ud-history tbody").innerHTML;
+  assert.match(html, /MyGeotab said no/, "an attempt that never reached Geotab is visible");
+  assert.match(html, /<td>10<\/td>/, "and a scheduled run reports its counts");
+  assert.equal((html.match(/Unassign Service/g) || []).length, 2, "one row per run, newest first");
+});
+
+test("a deployment without the run history still renders the tenant's own", async () => {
+  const h = await start({ license: STAFF_REGISTERED, errors: { listRuns: { code: "BAD_REQUEST", message: "Unknown action" } } });
+  assert.equal(h.calls.listRuns, 1);
+  assert.match(h.element("a1ud-history tbody").innerHTML, /No runs yet/, "no rows, no crash");
 });

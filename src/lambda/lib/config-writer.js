@@ -31,15 +31,18 @@ function clone(value) {
 
 function createConfigWriter(options) {
   const attempts = options.attempts || DEFAULT_ATTEMPTS;
+  // The same read-modify-write serves the run log, whose object has a different
+  // shape: the parser says what "a valid object of this kind" means.
+  const parse = options.parse || parseConfig;
 
   /**
-   * Applies `mutator(config) -> nextConfig | null` under an ETag guard.
+   * Applies `mutator(document) -> nextDocument | null` under an ETag guard.
    * A null result means "nothing to change" and writes nothing.
    */
   async function mutate(mutator) {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const current = await options.read();
-      const parsed = parseConfig(current.text); // validated, so a broken object is never rewritten
+      const parsed = parse(current.text); // validated, so a broken object is never rewritten
       const next = await mutator(clone(parsed));
       if (!next) return { unchanged: true, attempts: attempt };
       const text = JSON.stringify(next, null, 2) + "\n";

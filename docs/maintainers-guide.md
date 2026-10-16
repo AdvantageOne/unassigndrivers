@@ -251,6 +251,18 @@ it types the database name back before writing, and `--cleanup` removes the batc
     an `Origin` header** to check it. A bucket created by hand — any new region — has no rule until
     a deploy runs, and an empty `ALLOWED_ORIGINS` warns rather than inventing one.
 
+18. **A local Lambda archive has a 48 KiB ceiling.** With `filename`, the AWS provider inlines the
+    archive as a base64 `ZipFile` in the request, and the SDK refuses any request whose single line
+    passes 64 KiB. It surfaces as
+    `updating Lambda Function … code: operation error Lambda: UpdateFunctionCode, decomposing request: bufio.Scanner: token too long`
+    — with no mention of size, and only for artifacts over 49152 bytes. This service crossed that
+    line the day the run log was added, and the apply failed while a *smaller* artifact had deployed
+    fine minutes earlier. `scripts/deploy.sh` therefore uploads the artifact to the config bucket
+    first (`artifacts/lambda-<sha256>.zip`) and the module deploys from `s3_bucket`/`s3_key`. The key
+    names the content, so a stale object cannot be deployed; the cost is one small object per
+    artifact build, since zip embeds file times and the digest changes even when the code does not —
+    a lifecycle rule on `artifacts/` would be the tidy follow-up.
+
 ## 8. What is verified, and what is not
 
 | Area | Status |

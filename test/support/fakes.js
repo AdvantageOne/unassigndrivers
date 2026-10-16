@@ -308,6 +308,48 @@ function clone(value) {
   return value === undefined || value === null ? value : JSON.parse(JSON.stringify(value));
 }
 
+/**
+ * In-memory run-log objects, with the same read/write semantics the real store
+ * has: a missing object reads as empty, and a write with a stale ETag fails with
+ * PreconditionFailed (which is what the writer retries on).
+ */
+function createFakeRunLogStore(options) {
+  const settings = options || {};
+  const objects = new Map();
+  let version = 0;
+  let conflictsLeft = settings.conflicts || 0;
+  return {
+    objects,
+    reads: 0,
+    writes: 0,
+    async read(key) {
+      this.reads += 1;
+      if (settings.failReads) throw new Error("stub: read failed");
+      const found = objects.get(key);
+      return found ? { text: found.text, etag: found.etag } : { text: null, etag: null };
+    },
+    async write(key, text, etag) {
+      this.writes += 1;
+      if (settings.failWrites) throw new Error("stub: write failed");
+      // What S3 answers when If-Match does not hold: the name is what the
+      // writer's retry looks for.
+      if (conflictsLeft > 0) {
+        conflictsLeft -= 1;
+        throw conflict("PreconditionFailed");
+      }
+      const current = objects.get(key);
+      if (etag && current && current.etag !== etag) throw conflict("PreconditionFailed");
+      const next = { text, etag: `etag-${++version}` };
+      objects.set(key, next);
+      return { etag: next.etag };
+    },
+    text(key) {
+      const found = objects.get(key);
+      return found ? found.text : null;
+    }
+  };
+}
+
 function createFakeConfig(overrides) {
   const config = clone(DEFAULT_CONFIG);
   return Object.assign(config, overrides || {});
@@ -320,6 +362,7 @@ module.exports = {
   createCoreApi,
   createFakeGeotab,
   createFakeSchedulerClient,
+  createFakeRunLogStore,
   createFakeConfig,
   DEFAULT_CONFIG,
   conflict,

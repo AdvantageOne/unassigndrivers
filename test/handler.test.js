@@ -16,7 +16,7 @@ const { createLogger } = require("../src/lambda/lib/logger");
 const { createConfigStore } = require("../src/lambda/lib/config-store");
 const { createSecretStore } = require("../src/lambda/lib/secrets");
 const { createScheduler } = require("../src/lambda/lib/scheduler");
-const { createCoreApi, createFakeConfig, createFakeSchedulerClient } = require("./support/fakes");
+const { createCoreApi, createFakeConfig, createFakeSchedulerClient, createFakeRunLogStore } = require("./support/fakes");
 
 const ORIGIN = "https://my.geotab.com";
 
@@ -56,6 +56,7 @@ function harness(options) {
   const config = settings.config || createFakeConfig({});
   const groupsById = settings.groupsById || { GroupEverythingSecurityId: EVERYTHING, b200: GRANT, GroupSecurityId: CATALOG };
 
+  const runLogStore = settings.runLogStore || createFakeRunLogStore(settings.runLogStoreOptions || {});
   const deps = buildDeps({
     env: readEnv({
       CONFIG_BUCKET: "advone-ca-central-config",
@@ -87,6 +88,9 @@ function harness(options) {
       geotabFor: settings.geotabFor || (() => geotabFor(state, settings)),
       configWriter: settings.configWriter || fakeConfigWriter(config),
       secretPublisher: settings.secretPublisher || fakeSecretPublisher(),
+      // The real run-log code over an in-memory object store, so what a run
+      // records is asserted through the same path production uses.
+      runLogStore,
       now: () => new Date("2026-10-15T00:00:00.000Z")
     }
   });
@@ -96,6 +100,7 @@ function harness(options) {
     state,
     lines,
     schedulerClient,
+    runLogStore,
     config,
     context: { awsRequestId: "req-abc" },
     configWriter: deps.configWriter,
@@ -684,4 +689,99 @@ test("a broken payload or a broken secret fails the invocation so EventBridge re
     }
   });
   await assert.rejects(() => handleEvent(scheduledEvent(), broken.context, broken.deps), /ResourceNotFoundException/);
+});
+
+test("a scheduled run is recorded in the deployment's own run log", async () => {
+  const { deps, context, runLogStore } = harness({ coreOptions: CORE });
+  await handleEvent(scheduledEvent(), context, deps);
+
+  const recorded = JSON.parse(runLogStore.text("runs/tenant_a.json"));
+  assert.equal(recorded.runs.length, 1, "one object per database, one record per attempt");
+  const run = recorded.runs[0];
+  assert.equal(run.database, "tenant_a");
+  assert.equal(run.trigger, "scheduled");
+  assert.equal(run.by, "Unassign Service");
+  assert.equal(run.occurrence, "2026-10-15T00:00:00.000Z", "the slot the schedule fired for");
+  assert.equal(run.outcome, "ran");
+  assert.equal(run.unassigned, 1);
+  assert.equal(run.skipped, 1);
+});
+
+test("an add-in run is recorded with the caller as the author", async () => {
+  const { deps, context, runLogStore } = harness({ coreOptions: CORE });
+  const response = await handleEvent(httpEvent("unassign", { payload: { scope: { groupIds: [] }, skipDriving: false } }), context, deps);
+  assert.equal(response.statusCode, 200);
+
+  const run = JSON.parse(runLogStore.text("runs/tenant_a.json")).runs[0];
+  assert.equal(run.trigger, "manual");
+  assert.equal(run.by, "admin@example.com");
+  assert.equal(run.outcome, "ran");
+  assert.equal(run.unassigned, 2);
+  // The same occurrence the tenant's own log entry carries, so the add-in can
+  // tell the two records apart from one run.
+  assert.equal(run.occurrence, body(response).data.occurrence);
+});
+
+test("an attempt that never reached Geotab is still recorded", async () => {
+  const config = createFakeConfig({});
+  delete config.customers.tenant_a.license;
+  const { deps, context, runLogStore } = harness({ config });
+  const response = await handleEvent(httpEvent("unassign", { payload: {} }), context, deps);
+
+  assert.equal(response.statusCode, 403);
+  const run = JSON.parse(runLogStore.text("runs/tenant_a.json")).runs[0];
+  assert.equal(run.outcome, "denied");
+  assert.equal(run.code, "LICENSE_REQUIRED");
+  assert.equal(run.trigger, "manual");
+  assert.equal(run.unassigned, 0);
+});
+
+test("a scheduled run that fails is recorded before it is retried", async () => {
+  const { deps, context, runLogStore } = harness({
+    fetchSecret: async () => {
+      throw new Error("ResourceNotFoundException");
+    }
+  });
+  await assert.rejects(() => handleEvent(scheduledEvent(), context, deps));
+
+  const run = JSON.parse(runLogStore.text("runs/tenant_a.json")).runs[0];
+  assert.equal(run.outcome, "failed");
+  assert.equal(run.trigger, "scheduled");
+  assert.ok(run.reason, "the reason travels with the record");
+});
+
+test("a scheduled run for a database this deployment does not know is recorded too", async () => {
+  const { deps, context, runLogStore } = harness();
+  await assert.rejects(() => handleEvent(scheduledEvent({ geotab_database: "someone_else" }), context, deps));
+
+  const run = JSON.parse(runLogStore.text("runs/someone_else.json")).runs[0];
+  assert.equal(run.outcome, "failed");
+  assert.equal(run.code, "DATABASE_NOT_ONBOARDED");
+  assert.equal(run.database, "someone_else");
+});
+
+test("listRuns returns what the deployment recorded, for this database only", async () => {
+  const { deps, context } = harness({ coreOptions: CORE });
+  await handleEvent(scheduledEvent(), context, deps);
+  await handleEvent(scheduledEvent({ scheduled_time: "2026-10-15T01:00:00.000Z" }), context, deps);
+
+  const response = await handleEvent(httpEvent("listRuns", { payload: {} }), context, deps);
+  assert.equal(response.statusCode, 200);
+  const data = body(response).data;
+  assert.equal(data.database, "tenant_a");
+  assert.equal(data.source, "aws", "so the add-in can say where a row came from");
+  assert.equal(data.runs.length, 2);
+  assert.equal(data.runs[0].occurrence, "2026-10-15T01:00:00.000Z", "newest first");
+
+  const limited = body(await handleEvent(httpEvent("listRuns", { payload: { limit: 1 } }), context, deps)).data;
+  assert.equal(limited.runs.length, 1);
+});
+
+test("listRuns is gated like every other tenant action", async () => {
+  const config = createFakeConfig({});
+  delete config.customers.tenant_a.license;
+  const { deps, context } = harness({ config });
+  const response = await handleEvent(httpEvent("listRuns", { payload: {} }), context, deps);
+  assert.equal(response.statusCode, 403);
+  assert.equal(body(response).error.code, "LICENSE_REQUIRED");
 });

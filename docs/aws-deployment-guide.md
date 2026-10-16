@@ -260,6 +260,25 @@ scripts/offboard-customer.sh --region ca --delete-secret
 | Rotate a customer's password | Change it in MyGeotab, then re-run `scripts/onboard-customer.sh` for that database (it updates the secret in place) |
 | Delete a tenant's schedules | Add-in **Delete** per row, or `aws scheduler delete-schedule --name <n> --group-name UnassignDriverSchedules-<db>` |
 | Prove clearing works in a database | `scripts/seed-test-fleet.sh` (below), then a run, then the add-in's Run history |
+| Confirm a scheduled run happened | Add-in **Run history** (it lists the deployment's runs too), or `aws logs tail /aws/lambda/advone-unassign-api --since 1h` filtered on `"msg":"scheduled run finished"` |
+
+### Where the Run history comes from
+
+The add-in's Run history merges two sources, so it does not matter whether the run was started by the
+button or by the scheduled task:
+
+| Source | Written by | Holds |
+|---|---|---|
+| The tenant's own MyGeotab database (`AddInData`, per database) | whoever ran it — the service, or the browser in legacy mode | the **detail**: which asset had which driver, errors, "still assigned" |
+| `s3://<config-bucket>/runs/<database>.json` | the Lambda, on every attempt | the **answer**: occurrence, trigger, author, outcome and counts — including attempts that never reached Geotab (licence refusal, unknown database, MyGeotab down), and runs that happened while no browser was open |
+
+The add-in reads the second through the `listRuns` action and merges them on occurrence+trigger, so a
+run the service performed appears once, with the tenant's entry (the detailed one) winning. An
+attempt that exists only in AWS shows its counts and the reason instead of rows.
+
+That object is capped at the last 40 attempts per database, like the tenant's log, and the Lambda
+role may only read and write `runs/*` in that bucket — not the tenant registry, which is a separate,
+narrower grant.
 
 ### Proving a database clears for real
 

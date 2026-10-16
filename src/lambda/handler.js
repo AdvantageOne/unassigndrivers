@@ -31,6 +31,8 @@ const licenseActions = require("./actions/license");
 const scheduleActions = require("./actions/schedules");
 const unassign = require("./actions/unassign");
 const assignments = require("./actions/assignments");
+const runActions = require("./actions/runs");
+const runLogLib = require("./lib/run-log");
 const { health } = require("./actions/health");
 
 /** Shown as "By" in the add-in's Run history (decision D7: keep the label). */
@@ -66,6 +68,10 @@ const ACTIONS = {
   addRun: { run: (context, payload) => scheduleActions.addRun(context, payload) },
   deleteSchedule: { run: (context, payload) => scheduleActions.deleteSchedule(context, payload) },
   listAssignments: { run: (context, payload) => assignments.listAssignments(Object.assign({}, context, { scope: scopeOf(payload, context) })) },
+  // What this service has run for the database, from the deployment's own run
+  // log: scheduled runs (which no browser had to be open for) and the add-in's
+  // own. Same gate as the rest of the scheduler surface.
+  listRuns: { run: (context, payload) => runActions.listRuns(context, payload) },
   unassign: {
     run: (context, payload) =>
       unassign.runUnassign(
@@ -130,6 +136,13 @@ function buildDeps(options) {
   const configWriter =
     overrides.configWriter ||
     createConfigWriter({ read: () => configReadWrite.read(), write: (text, etag) => configReadWrite.write(text, etag) });
+  const runLog =
+    overrides.runLog ||
+    runLogLib.createRunLog({
+      store: overrides.runLogStore || require("./aws").createRunLogStore({ bucket: env.configBucket, region: env.region }),
+      prefix: env.runLogPrefix,
+      logger
+    });
   const secretPublisher =
     overrides.secretPublisher ||
     createSecretPublisher({ client: overrides.secretWriteClient || require("./aws").createSecretPublisherAdapter() });
@@ -141,6 +154,7 @@ function buildDeps(options) {
     secretStore,
     configWriter,
     secretPublisher,
+    runLog,
     geotabFor,
     scheduler,
     now: overrides.now || (() => new Date())
@@ -242,17 +256,60 @@ async function handleHttp(request, deps, requestId) {
       scheduler: deps.scheduler,
       secretStore: deps.secretStore,
       configWriter: deps.configWriter,
-      secretPublisher: deps.secretPublisher
+      secretPublisher: deps.secretPublisher,
+      runLog: deps.runLog
     };
     const data = await definition.run(context, body.payload || {});
     logger.info("action completed", { outcome: "ok", database: session.database, code: "OK", licensed: license.licensed });
+    if (action === "unassign") {
+      // The add-in's own run writes into the tenant's log as well; this is the
+      // deployment's record of the attempt, so the history can show it even if
+      // that write did not land.
+      await recordRun(
+        deps,
+        {
+          at: (data && data.at) || deps.now().toISOString(),
+          database: session.database,
+          occurrence: (data && data.occurrence) || null,
+          trigger: "manual",
+          by: session.userName,
+          requestId,
+          code: "OK"
+        },
+        data
+      );
+    }
     return http.ok(data, { requestId, action, origin, allowedOrigins });
   } catch (error) {
     const app = asAppError(error);
     const outcome = DENIED_CODES.has(app.code) ? "denied" : "failed";
     logger.warn("action failed", { outcome, database: (body.session && body.session.database) || null, code: app.code, reason: app.message });
+    if (action === "unassign") {
+      // A manual run that never got as far as Geotab: this record is the only
+      // place that attempt exists.
+      await recordRun(deps, {
+        at: deps.now().toISOString(),
+        database: (body.session && body.session.database) || null,
+        trigger: "manual",
+        by: (body.session && body.session.userName) || null,
+        requestId,
+        outcome,
+        code: app.code,
+        reason: app.message
+      });
+    }
     return http.failure(app, { requestId, origin, allowedOrigins });
   }
+}
+
+/**
+ * Records one run attempt in the deployment's run log (see lib/run-log.js).
+ * Never throws: the run happened whether or not its record could be written.
+ */
+function recordRun(deps, fields, summary) {
+  if (!deps.runLog) return Promise.resolve({ recorded: false });
+  const record = summary ? runLogLib.recordFromSummary(fields, summary) : runLogLib.recordFor(fields);
+  return deps.runLog.record(record).catch(() => ({ recorded: false }));
 }
 
 async function handleScheduled(payload, deps, requestId) {
@@ -270,8 +327,11 @@ async function handleScheduled(payload, deps, requestId) {
   // it for as long as the schedule exists.
   const config = await deps.configStore.get();
   const customer = (config.customers && config.customers[database]) || null;
+  const occurrence = payload.scheduled_time || deps.now().toISOString();
   if (!customer) {
     logger.error("scheduled run for an unconfigured database", null, { outcome: "failed", code: "DATABASE_NOT_ONBOARDED" });
+    // The record for this one is written by the scheduler boundary, which is
+    // where everything that throws from here is recorded.
     throw appError(
       "DATABASE_NOT_ONBOARDED",
       `A schedule fired for "${database}", which has no configuration in this deployment.`
@@ -281,6 +341,17 @@ async function handleScheduled(payload, deps, requestId) {
     // Disabling a tenant is a deliberate operator action, so it stays quiet: no
     // retry, no DLQ entry, no alarm for a decision someone made on purpose.
     logger.warn("scheduler invocation skipped", { outcome: "disabled", code: "DATABASE_NOT_ONBOARDED", reason: "the customer is disabled" });
+    await recordRun(deps, {
+      at: deps.now().toISOString(),
+      database,
+      occurrence,
+      trigger: "scheduled",
+      by: RUNNER_NAME,
+      requestId,
+      outcome: "disabled",
+      code: "DATABASE_NOT_ONBOARDED",
+      reason: "the customer is disabled"
+    });
     return { statusCode: 200, body: JSON.stringify({ skipped: "DATABASE_NOT_ONBOARDED", message: "Customer is disabled." }) };
   }
 
@@ -291,6 +362,17 @@ async function handleScheduled(payload, deps, requestId) {
     const described = await deps.scheduler.describe(database, payload.schedule_name);
     if (!described) {
       logger.warn("scheduled run for a schedule that no longer exists", { outcome: "idle", schedule: payload.schedule_name });
+      await recordRun(deps, {
+        at: deps.now().toISOString(),
+        database,
+        occurrence,
+        trigger: "scheduled",
+        by: RUNNER_NAME,
+        requestId,
+        outcome: "idle",
+        code: "NOT_FOUND",
+        reason: "the schedule no longer exists"
+      });
       return { statusCode: 200, body: JSON.stringify({ skipped: "NOT_FOUND", message: "Schedule no longer exists." }) };
     }
   }
@@ -307,7 +389,7 @@ async function handleScheduled(payload, deps, requestId) {
       skipDriving: payload.skip_driving !== false,
       trigger: "scheduled",
       by: RUNNER_NAME,
-      occurrence: payload.scheduled_time || deps.now().toISOString(),
+      occurrence,
       invocationId: requestId
     });
     const outcome = result.skippedReason ? "idle" : result.dryRun ? "checked" : result.failed ? "failed" : "ran";
@@ -320,6 +402,22 @@ async function handleScheduled(payload, deps, requestId) {
       stillAssigned: result.stillAssigned,
       schedule: payload.schedule_name || null
     });
+    // The deployment's record of the slot: this is what the add-in's history
+    // reads back to confirm a run happened while nobody was watching.
+    await recordRun(
+      deps,
+      {
+        at: result.at || deps.now().toISOString(),
+        database,
+        occurrence,
+        trigger: "scheduled",
+        by: RUNNER_NAME,
+        requestId,
+        code: "OK",
+        reason: result.skippedReason || null
+      },
+      result
+    );
     return { statusCode: 200, body: JSON.stringify(result) };
   } catch (error) {
     const app = asAppError(error);
@@ -329,6 +427,8 @@ async function handleScheduled(payload, deps, requestId) {
       reason: app.message,
       database
     });
+    // Recorded at the scheduler boundary, together with every other way this can
+    // fail before the run starts.
     throw error;
   }
 }
@@ -355,7 +455,28 @@ async function handleEvent(event, context, deps) {
   });
 
   if (parsed.kind === "scheduler") {
-    return handleScheduled(parsed.payload, deps, requestId);
+    try {
+      return await handleScheduled(parsed.payload, deps, requestId);
+    } catch (error) {
+      // Every way a scheduled run can fail lands here — an unknown database, a
+      // secret that cannot be read, MyGeotab refusing the credentials, the run
+      // itself — and each has to leave a record: this is the only trace of an
+      // attempt that never reached Geotab. It still throws, so EventBridge
+      // retries and the DLQ alarm fires.
+      const app = asAppError(error);
+      await recordRun(deps, {
+        at: deps.now().toISOString(),
+        database: (parsed.payload && parsed.payload.geotab_database) || null,
+        occurrence: (parsed.payload && parsed.payload.scheduled_time) || deps.now().toISOString(),
+        trigger: "scheduled",
+        by: RUNNER_NAME,
+        requestId,
+        outcome: "failed",
+        code: app.code,
+        reason: app.message
+      });
+      throw error;
+    }
   }
 
   if (parsed.kind === "http") {
