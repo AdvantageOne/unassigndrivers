@@ -10,6 +10,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { buildDeps, handleEvent } = require("../src/lambda/handler");
+const { appError } = require("../src/lambda/lib/errors");
 const { readEnv } = require("../src/lambda/env");
 const { createLogger } = require("../src/lambda/lib/logger");
 const { createConfigStore } = require("../src/lambda/lib/config-store");
@@ -372,11 +373,59 @@ test("a disabled tenant is skipped without a retry", async () => {
   assert.deepEqual(outcomes(lines), ["disabled"]);
 });
 
-test("an unknown database is skipped without making anything retry", async () => {
-  const { deps, context } = harness();
-  const response = await handleEvent(scheduledEvent({ geotab_database: "who_is_this" }), context, deps);
-  assert.equal(response.statusCode, 200);
-  assert.equal(JSON.parse(response.body).skipped, "DATABASE_NOT_ONBOARDED");
+test("a schedule for an unconfigured database fails so it lands in the DLQ", async () => {
+  const { deps, context, lines, state } = harness();
+  await assert.rejects(
+    () => handleEvent(scheduledEvent({ geotab_database: "who_is_this" }), context, deps),
+    (error) => error.code === "DATABASE_NOT_ONBOARDED" && /no configuration/.test(error.message)
+  );
+  assert.equal(state.behaviour.addedChanges.length, 0, "nothing may be written for an unconfigured database");
+  const failure = lines.find((line) => line.msg === "scheduled run for an unconfigured database");
+  assert.equal(failure.outcome, "failed");
+  assert.equal(failure.database, "who_is_this");
+});
+
+test("a secret MyGeotab rejects fails the run and writes nothing", async () => {
+  const { deps, context, lines, state } = harness({
+    geotabFor: () => ({
+      server: "my.geotab.test",
+      authenticate: async () => {
+        throw appError("INTERNAL", "InvalidUserException: the service account password is wrong");
+      },
+      session: () => ({ call: async () => [], multiCall: async () => [] })
+    })
+  });
+
+  await assert.rejects(
+    () => handleEvent(scheduledEvent(), context, deps),
+    (error) => error.code === "INTERNAL" && /service account password/.test(error.message)
+  );
+  assert.equal(state.behaviour.addedChanges.length, 0);
+  assert.equal(state.state.addInData.length, 0, "no run record for a run that never happened");
+  const failure = lines.filter((line) => line.msg === "scheduled run failed").pop();
+  assert.equal(failure.outcome, "failed");
+  assert.equal(failure.code, "INTERNAL");
+});
+
+test("the license action still refuses an unproven session", async () => {
+  const { deps, context, lines } = harness({ users: [] });
+  const response = await handleEvent(httpEvent("license"), context, deps);
+  assert.equal(response.statusCode, 401);
+  assert.equal(body(response).error.code, "SESSION_INVALID");
+  assert.deepEqual(outcomes(lines), ["denied"]);
+});
+
+test("the staff setup still refuses an unproven session", async () => {
+  const { deps, context, configWriter, secretPublisher } = harness({ users: [] });
+  const response = await handleEvent(
+    httpEvent("saveWorkerCredentials", { payload: { workerUserName: "svc@customer.com", workerPassword: "x" } }),
+    context,
+    deps
+  );
+  assert.equal(response.statusCode, 401);
+  assert.equal(body(response).error.code, "SESSION_INVALID");
+  assert.equal(configWriter.writes.length, 0);
+  assert.equal(secretPublisher.secrets.length, 0);
 });
 
 test("a schedule that was deleted before it fired is skipped", async () => {

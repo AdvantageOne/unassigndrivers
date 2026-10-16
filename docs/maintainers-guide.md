@@ -213,10 +213,15 @@ the version (`v2.0.1`) — jsDelivr caches tags forever, so never move one.
     unlicensed sentence lives in three places — `MESSAGE_UNLICENSED` in
     `src/lambda/actions/license.js`, `ERROR_TEXT.LICENSE_REQUIRED` in `src/addin/api-client.js` and
     the modal markup in `unassignDrivers.html` — and a test fails if they drift apart.
-14. **The setup panel writes twice, in this order:** Secrets Manager first, then the config record.
+14. **The scheduled path fails loudly, by design, and the difference is deliberate.** A payload for a
+    database with **no record** throws (retry → DLQ → alarm); a record with `enabled: false` returns
+    `200 skipped` quietly; credentials the secret no longer satisfies throw. Do not "fix" a DLQ
+    full of `DATABASE_NOT_ONBOARDED` by making the handler succeed — that hides a leftover schedule
+    forever. Delete the schedule or onboard the database.
+15. **The setup panel writes twice, in this order:** Secrets Manager first, then the config record.
     Reversing it would leave a database pointing at a secret that does not exist, which breaks every
     scheduled run. It also verifies the credentials against MyGeotab before either write.
-15. **Offline green does not mean the call site is covered.** Two deploy-script bugs (the binary
+16. **Offline green does not mean the call site is covered.** Two deploy-script bugs (the binary
     plan file fed to jq, the artifact check killed by `pipefail`) passed every selftest because the
     *function* was exercised and its caller was not. When you change an argument or a contract, add
     an assertion on the call site.

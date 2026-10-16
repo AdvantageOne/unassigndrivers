@@ -260,18 +260,29 @@ async function handleScheduled(payload, deps, requestId) {
   const logger = deps.logger.child({ action: "scheduler", database: database || "unknown", requestId });
   if (!database) throw appError("BAD_REQUEST", "The schedule payload has no geotab_database.");
 
-  let customer;
-  try {
-    const found = await deps.configStore.getCustomer(database);
-    customer = found.customer;
-  } catch (error) {
-    // A disabled or unknown tenant is not a transient failure: log it, tell the
-    // Scheduler it succeeded, and let the "denied" metric carry the signal.
-    const app = asAppError(error);
-    logger.warn("scheduler invocation skipped", { outcome: "disabled", code: app.code, reason: app.message });
-    return { statusCode: 200, body: JSON.stringify({ skipped: app.code, message: app.message }) };
+  // The configuration is the gate: a schedule that fires for a database this
+  // deployment knows nothing about is a misconfiguration (a leftover schedule
+  // after an offboarding, say), so it fails loudly — the invocation is retried,
+  // then parked in the DLQ, and the alarm fires. Silently succeeding would hide
+  // it for as long as the schedule exists.
+  const config = await deps.configStore.get();
+  const customer = (config.customers && config.customers[database]) || null;
+  if (!customer) {
+    logger.error("scheduled run for an unconfigured database", null, { outcome: "failed", code: "DATABASE_NOT_ONBOARDED" });
+    throw appError(
+      "DATABASE_NOT_ONBOARDED",
+      `A schedule fired for "${database}", which has no configuration in this deployment.`
+    );
+  }
+  if (customer.enabled !== true) {
+    // Disabling a tenant is a deliberate operator action, so it stays quiet: no
+    // retry, no DLQ entry, no alarm for a decision someone made on purpose.
+    logger.warn("scheduler invocation skipped", { outcome: "disabled", code: "DATABASE_NOT_ONBOARDED", reason: "the customer is disabled" });
+    return { statusCode: 200, body: JSON.stringify({ skipped: "DATABASE_NOT_ONBOARDED", message: "Customer is disabled." }) };
   }
 
+  // A secret that cannot be read, or whose credentials MyGeotab rejects, fails
+  // the invocation the same way: the run does not happen and someone is told.
   const secret = await deps.secretStore.get(customer.secretName, database);
   if (payload.schedule_name) {
     const described = await deps.scheduler.describe(database, payload.schedule_name);
@@ -308,7 +319,13 @@ async function handleScheduled(payload, deps, requestId) {
     });
     return { statusCode: 200, body: JSON.stringify(result) };
   } catch (error) {
-    logger.error("scheduled run failed", error, { outcome: "failed" });
+    const app = asAppError(error);
+    logger.error("scheduled run failed", error, {
+      outcome: "failed",
+      code: app.code,
+      reason: app.message,
+      database
+    });
     throw error;
   }
 }

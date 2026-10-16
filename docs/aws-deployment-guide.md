@@ -171,6 +171,12 @@ Two consequences worth knowing:
 - **The Lambda can now write.** Its role may create or update `unassign/*` secrets and write the one
   config object. Both are reachable only through the staff-only action, behind a proven MyGeotab
   session.
+- **The scheduled path is gated on the configuration, and fails loudly when it is missing.** A
+  schedule that fires for a database with no record in this deployment (a leftover after an
+  offboarding, for instance) errors: EventBridge retries the invocation, the payload lands in the
+  DLQ and the alarm fires. The same happens when the service account in the secret no longer signs
+  in — the run does not happen and someone is told. A record that is present but `"enabled": false`
+  is skipped quietly instead, because that is a decision an operator made on purpose.
 
 To unlicense a database, set `"licensed": false` (the add-in reads the config at most 60 seconds
 later); to disable it entirely, set `"enabled": false`.
@@ -207,7 +213,7 @@ line always names the tenant.
 | `UnassignStillAssigned` (`stillAssigned > 0`) | Assets were written but a driver re-appeared on the verification pass (a key or Geotab Drive re-asserted a login) | Expected occasionally; if it repeats for one tenant, check their Drive usage |
 | `UnassignDenied` (`outcome = "denied"`) | A browser request failed authorization (bad session, unknown database, missing clearance) | Usually a stale session; a sustained spike means the add-in's security id or `ALLOWED_ORIGINS` is wrong |
 | Lambda `Errors` / `Throttles` | The function threw, or hit concurrency limits | Read the failed invocation's log; a thrown error on the scheduled path also retries and can land in the DLQ |
-| DLQ depth ≥ 1 | A scheduled run failed enough times to be parked | Inspect the message for the payload and the reason, fix, then delete it |
+| DLQ depth ≥ 1 | A scheduled run failed enough times to be parked — most often a schedule firing for a database with **no configuration** (leftover after an offboarding), or service-account credentials in the secret that MyGeotab now rejects | Inspect the message for the payload and the reason, fix it (onboard the database, or rotate the credential with `scripts/onboard-customer.sh`), then delete the message. Delete the schedule too if the database is gone for good |
 
 Log lines are JSON and include `outcome`, `action`, `database`, `unassigned`, `skipped`, `failed`,
 `stillAssigned` and `requestId`. Query them with CloudWatch Logs Insights, for example

@@ -442,6 +442,11 @@ test/*.test.js                     # unit tests
 - Scheduled invoke: read config → resolve secret → run the core `run()` with the schedule's scope
   and `skipDriving` → append the run record to the tenant's Geotab `AddInData` log (`trigger:
   "scheduled"`, `by: "Unassign Service"`, `occurrence: event.scheduled_time`) → return counts.
+- **The configuration is the gate.** No record for the payload's database → throw, so EventBridge
+  retries, the payload reaches the DLQ and the alarm fires (a leftover schedule must not hide).
+  `enabled: false` on an existing record → return `200 skipped` quietly, because that is a decision
+  an operator made. A secret that cannot be read, or whose credentials MyGeotab rejects, throws the
+  same way as a missing record: no run, no run record, alarm raised.
 - Manual invoke: same worker, `trigger: "manual"`, `by: <session user>`, after the Step 4 gate.
 - Preserve the old lock semantics where a second writer can still exist (open legacy add-in tabs):
   keep `claimOccurrence` on the tenant's `AddInData` schedule record during the transition, and
