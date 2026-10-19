@@ -261,6 +261,7 @@ scripts/offboard-customer.sh --region ca --delete-secret
 | Delete a tenant's schedules | Add-in **Delete** per row, or `aws scheduler delete-schedule --name <n> --group-name UnassignDriverSchedules-<db>` |
 | Prove clearing works in a database | `scripts/seed-test-fleet.sh` (below), then a run, then the add-in's Run history |
 | Confirm a scheduled run happened | Add-in **Run history** (it lists the deployment's runs too), or `aws logs tail /aws/lambda/advone-unassign-api --since 1h` filtered on `"msg":"scheduled run finished"` |
+| See when a database runs | The add-in's header — it names the next run from the schedules this deployment holds for that database, found by its Geotab database name — or `aws scheduler list-schedules --group-name UnassignDriverSchedules-<database>` |
 
 ### Where the Run history comes from
 

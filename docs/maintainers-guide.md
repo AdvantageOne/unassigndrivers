@@ -263,6 +263,15 @@ it types the database name back before writing, and `--cleanup` removes the batc
     artifact build, since zip embeds file times and the digest changes even when the code does not —
     a lifecycle rule on `artifacts/` would be the tidy follow-up.
 
+19. **`scheduler:ListSchedules` cannot be scoped to the group's ARN.** Every other scheduler action
+    here uses `schedule/<prefix>-*/*`, and the list call looks like it belongs there too — but AWS
+    evaluates it against the account-level `schedule/*/*`, so with the narrow resource every lookup
+    fails with `not authorized to perform: scheduler:ListSchedules on resource: …:schedule/*/*`,
+    which the add-in sees as an `INTERNAL` error however healthy the credentials, the licence and
+    the schedule itself are. It has a statement of its own (`ListTenantSchedules`) for that reason.
+    Nothing surfaced this until the header panel asked for the schedule — until then the licence
+    gate refused the call before AWS was ever reached, so the permission looked fine.
+
 ## 8. What is verified, and what is not
 
 | Area | Status |

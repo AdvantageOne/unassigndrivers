@@ -1079,6 +1079,12 @@ geotab.addin.unassignDrivers = function () {
   // a scheduled slot fires with no browser open, and an attempt that never
   // reached Geotab exists nowhere else.
   var awsRuns = [];
+  // What the deployment holds for this database, found by its Geotab database
+  // name (the service's listSchedules action). In server mode that is the
+  // schedule that actually fires, so it is what the header panel shows. `known`
+  // stays false until an answer arrives: the panel must never invent a time.
+  var remoteSchedules = { known: false, list: [] };
+  var schedulesFetchedAt = 0;
   var groups = [];
   var tickTimer = null, clockTimer = null, tickCount = 0;
   var running = false, wakeLock = null, lastRows = [];
@@ -1214,21 +1220,96 @@ geotab.addin.unassignDrivers = function () {
   }
 
   /* ---------------- status ---------------- */
-  function renderStatus() {
-    var s = sched();
-    var next = s && s.enabled ? core.nextOccurrence(s, new Date(Math.max(Date.now(), s.lastOccurrence ? Date.parse(s.lastOccurrence) : 0))) : null;
-    if (!next) {
-      $("a1ud-next").textContent = s && s.enabled ? "No upcoming run" : "Not scheduled";
-      $("a1ud-countdown").textContent = "";
-      if (!running) setState("Idle");
-      return;
-    }
-    $("a1ud-next").textContent = fmt(next, s.timeZone);
-    var ms = next - Date.now();
+  /** "in 3d 4h 12m 5s" — seconds only on the last day, as the header always read. */
+  function countdownText(ms) {
     var h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000), sec = Math.floor((ms % 60000) / 1000);
     var d = Math.floor(h / 24);
-    $("a1ud-countdown").textContent = "in " + (d ? d + "d " + (h % 24) + "h " : h ? h + "h " : "") + m + "m " + (d ? "" : sec + "s");
-    if (!running) setState("Armed", "is-armed");
+    return "in " + (d ? d + "d " + (h % 24) + "h " : h ? h + "h " : "") + m + "m " + (d ? "" : sec + "s");
+  }
+
+  function showNext(text, detail, state) {
+    $("a1ud-next").textContent = text;
+    $("a1ud-countdown").textContent = detail;
+    if (!running) setState(state, state === "Armed" ? "is-armed" : "");
+  }
+
+  /**
+   * When one of the deployment's schedules runs next. A recurring plan carries
+   * enough to recompute it here, which keeps the countdown honest between
+   * refreshes and after a slot fires; a one-time run has only the instant the
+   * service computed for it.
+   */
+  function remoteNextRun(schedule) {
+    if (schedule.kind !== "one-time" && schedule.mode && schedule.time) {
+      var next = core.nextOccurrence({
+        enabled: true, mode: schedule.mode, time: schedule.time,
+        timeZone: schedule.timeZone || undefined, days: schedule.days || [], onceDate: null
+      }, new Date());
+      if (next) return next.getTime();
+    }
+    var at = schedule.nextRun ? Date.parse(schedule.nextRun) : NaN;
+    return !isNaN(at) && at > Date.now() ? at : null;
+  }
+
+  /** Which of this database's schedules runs next, if any. */
+  function nextRemoteRun() {
+    var best = null;
+    (remoteSchedules.list || []).forEach(function (schedule) {
+      // AWS's own state: a disabled schedule will not fire, so it is not "next".
+      if (schedule.state && schedule.state !== "ENABLED") return;
+      var at = remoteNextRun(schedule);
+      if (!at) return;
+      if (!best || at < best.at) best = { at: at, schedule: schedule };
+    });
+    return best;
+  }
+
+  /** "every day at 23:00" / "every Mon, Wed at 06:30" / "a one-time run". */
+  function scheduleWhen(schedule) {
+    if (schedule.kind === "one-time") return "a one-time run";
+    var at = schedule.time ? " at " + schedule.time : "";
+    if (schedule.mode === "weekly") {
+      var days = (schedule.days || []).map(function (d) { return DAY_NAMES[d]; }).join(", ");
+      return "every " + (days || "—") + at;
+    }
+    return "every day" + at;
+  }
+
+  /**
+   * The header panel in server mode: the schedule Advantage One's scheduler holds
+   * for this database, and when it runs next. That schedule fires whether or not
+   * anyone has MyGeotab open, so it — not the copy saved in this browser — is
+   * what the user is owed.
+   */
+  function renderServerStatus() {
+    if (!remoteSchedules.known) {
+      // Not asked yet, or the ask was refused: claim nothing.
+      return showNext("Managed on AWS", "Runs on our scheduler, with or without this page open.", "Idle");
+    }
+    var upcoming = nextRemoteRun();
+    if (!upcoming) {
+      var list = remoteSchedules.list || [];
+      var enabled = list.filter(function (s) { return !s.state || s.state === "ENABLED"; });
+      return showNext(
+        list.length ? "No upcoming run" : "Not scheduled",
+        !list.length ? "Nothing is scheduled for this database yet."
+          : !enabled.length ? "This database's schedule is turned off."
+            : "Nothing is due from the schedules this database has.",
+        "Idle"
+      );
+    }
+    var s = upcoming.schedule;
+    showNext(fmt(new Date(upcoming.at), s.timeZone), countdownText(upcoming.at - Date.now()) + " — " + scheduleWhen(s), "Armed");
+  }
+
+  function renderStatus() {
+    // Server mode: AWS owns the schedule, so the deployment's answer is the
+    // answer (see renderServerStatus). The local record is the legacy path's.
+    if (serverMode()) return renderServerStatus();
+    var s = sched();
+    var next = s && s.enabled ? core.nextOccurrence(s, new Date(Math.max(Date.now(), s.lastOccurrence ? Date.parse(s.lastOccurrence) : 0))) : null;
+    if (!next) return showNext(s && s.enabled ? "No upcoming run" : "Not scheduled", "", "Idle");
+    showNext(fmt(next, s.timeZone), countdownText(next - Date.now()), "Armed");
   }
 
   function renderHistory() {
@@ -1500,18 +1581,32 @@ geotab.addin.unassignDrivers = function () {
       .then(reload); // the run log is written to Geotab, so refresh Run history
   }
 
-  function refreshSchedules() {
+  /**
+   * This database's schedules, from the deployment (which finds them by the
+   * Geotab database name the session carries). `quiet` is for the background
+   * refresh: it must not flash "Loading…" over a tab nobody asked.
+   */
+  function refreshSchedules(options_) {
+    var quiet = !!(options_ && options_.quiet);
     var msg = $("a1ud-schedules-msg");
-    if (msg) msg.textContent = "Loading…";
+    if (msg && !quiet) msg.textContent = "Loading…";
     return serverClient()
       .listSchedules()
       .then(function (data) {
         var list = (data && data.schedules) || [];
+        remoteSchedules = { known: true, list: list };
+        schedulesFetchedAt = Date.now();
         renderSchedules(list);
+        renderStatus();
         if (msg) msg.textContent = list.length + " schedule" + (list.length === 1 ? "" : "s");
         return data;
       })
       .catch(function (e) {
+        // A refusal, or a service that cannot be reached, is not the same as
+        // "nothing is scheduled" — so the panel keeps saying AWS owns the
+        // schedule rather than naming a time it was never told.
+        remoteSchedules = { known: false, list: [] };
+        renderStatus();
         if (msg) msg.textContent = serverMessage(e);
         return { schedules: [] };
       });
@@ -1633,6 +1728,10 @@ geotab.addin.unassignDrivers = function () {
       if (state === "unlicensed") return null; // the overlay explains it
       if (state === "setup") {
         $("a1ud-schedules-msg").textContent = "No schedules yet — save a service account above to register this database.";
+        // Not registered: there is no schedule to report, and in server mode this
+        // page no longer runs one itself, so say exactly that.
+        remoteSchedules = { known: false, list: [] };
+        showNext("Not scheduled", "This database is not registered yet — see Service account setup.", "Idle");
         return null;
       }
       return refreshSchedules();
@@ -1733,10 +1832,23 @@ geotab.addin.unassignDrivers = function () {
     });
   }
 
+  /**
+   * Keeps the header in step with what AWS holds, so a schedule changed in
+   * another browser — or a slot that just fired — shows up without a reload.
+   * Nothing is asked while this database is not registered: that would only
+   * earn a refusal.
+   */
+  function refreshServerSchedules(force) {
+    if (!remoteSchedules.known) return Promise.resolve();
+    if (!force && Date.now() - schedulesFetchedAt < TICK_MS * RELOAD_EVERY_TICKS) return Promise.resolve();
+    return refreshSchedules({ quiet: true });
+  }
+
   function tick(forceReload) {
     if (running || stopped) return Promise.resolve();
-    // In server mode AWS owns the schedule; this tab must never run one too.
-    if (serverMode()) return Promise.resolve();
+    // In server mode AWS owns the schedule; this tab must never run one too —
+    // but it does keep the "next scheduled run" panel truthful.
+    if (serverMode()) return refreshServerSchedules(forceReload);
     tickCount++;
     var s0 = sched();
     var localDue = s0 && core.evaluateDue(s0, new Date()).action !== "none";

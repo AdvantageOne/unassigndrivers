@@ -383,3 +383,108 @@ test("a deployment without the run history still renders the tenant's own", asyn
   assert.equal(h.calls.listRuns, 1);
   assert.match(h.element("a1ud-history tbody").innerHTML, /No runs yet/, "no rows, no crash");
 });
+
+/* ---------------- the header: when this database's schedule runs ---------------- */
+
+const DAILY_2300 = {
+  name: "all-2300-abcd1234",
+  kind: "recurring", mode: "daily", time: "23:00", days: [],
+  timeZone: "America/Edmonton", state: "ENABLED", nextRun: "2026-10-20T05:00:00.000Z"
+};
+
+test("the header names the time the deployment's schedule runs", async () => {
+  const h = await start({ license: TENANT_LICENSED, userName: TENANT, schedules: { database: "advone_matt_dev1", schedules: [DAILY_2300] } });
+
+  assert.equal(h.calls.listSchedules, 1);
+  const next = h.element("a1ud-next").textContent;
+  assert.doesNotMatch(next, /Managed on AWS|Not scheduled/, "the schedule that fires is the one to show");
+  assert.match(h.element("a1ud-countdown").textContent, /^in \d/, "and how long until it does");
+  assert.match(h.element("a1ud-countdown").textContent, /every day at 23:00/);
+  assert.equal(h.element("a1ud-state").textContent, "Armed");
+});
+
+test("the soonest of this database's schedules is the one shown", async () => {
+  const h = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    schedules: {
+      schedules: [
+        { name: "later", kind: "one-time", state: "ENABLED", nextRun: "2026-12-24T08:00:00.000Z" },
+        { name: "soon", kind: "recurring", mode: "daily", time: "21:15", days: [], timeZone: "UTC", state: "ENABLED" }
+      ]
+    }
+  });
+
+  const countdown = h.element("a1ud-countdown").textContent;
+  assert.match(countdown, /every day at 21:15/, "a daily schedule is sooner than a one-off next month");
+  assert.doesNotMatch(countdown, /one-time/);
+});
+
+test("a one-time run is shown, and one already in the past is not", async () => {
+  const ahead = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    schedules: { schedules: [{ name: "run-20261120T080000Z-ab12cd34", kind: "one-time", state: "ENABLED", nextRun: "2026-11-20T08:00:00.000Z" }] }
+  });
+  assert.match(ahead.element("a1ud-countdown").textContent, /a one-time run/);
+
+  const past = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    schedules: { schedules: [{ name: "run-old", kind: "one-time", state: "ENABLED", nextRun: "2020-01-01T00:00:00.000Z" }] }
+  });
+  assert.equal(past.element("a1ud-next").textContent, "No upcoming run");
+  assert.match(past.element("a1ud-countdown").textContent, /Nothing is due/);
+});
+
+test("a disabled schedule is reported as turned off, never as a time to come", async () => {
+  const h = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    schedules: { schedules: [Object.assign({}, DAILY_2300, { state: "DISABLED" })] }
+  });
+
+  assert.equal(h.element("a1ud-next").textContent, "No upcoming run");
+  assert.match(h.element("a1ud-countdown").textContent, /turned off/);
+  assert.equal(h.element("a1ud-state").textContent, "Idle");
+});
+
+test("with nothing scheduled, the header says so", async () => {
+  const h = await start({ license: TENANT_LICENSED, userName: TENANT });
+
+  assert.equal(h.element("a1ud-next").textContent, "Not scheduled");
+  assert.match(h.element("a1ud-countdown").textContent, /Nothing is scheduled for this database yet/);
+});
+
+test("an unregistered database is told what the state is, not given a time", async () => {
+  const h = await start({ license: LICENSED_NOT_REGISTERED });
+
+  assert.equal(h.element("a1ud-next").textContent, "Not scheduled");
+  assert.match(h.element("a1ud-countdown").textContent, /not registered yet/);
+});
+
+test("a refused schedule list leaves the header claiming nothing", async () => {
+  const h = await start({
+    license: STAFF_REGISTERED,
+    errors: { listSchedules: { code: "LICENSE_REQUIRED", message: "not licensed" } }
+  });
+
+  assert.equal(h.element("a1ud-next").textContent, "Managed on AWS", "no time when the answer never came");
+});
+
+test("saving a schedule puts its time in the header without a reload", async () => {
+  const h = await start({ license: TENANT_LICENSED, userName: TENANT });
+  assert.equal(h.element("a1ud-next").textContent, "Not scheduled");
+
+  h.element("a1ud-enabled").checked = true;
+  h.element("a1ud-mode").value = "daily";
+  h.element("a1ud-time").value = "22:45";
+  h.element("a1ud-tz").value = "UTC";
+  h.settings.schedules = { schedules: [{ name: "all-2245-abcd1234", kind: "recurring", mode: "daily", time: "22:45", days: [], timeZone: "UTC", state: "ENABLED" }] };
+
+  h.click("a1ud-save");
+  await settle();
+
+  assert.equal(h.calls.listSchedules, 2, "the save re-reads what the deployment now holds");
+  assert.match(h.element("a1ud-countdown").textContent, /every day at 22:45/);
+});

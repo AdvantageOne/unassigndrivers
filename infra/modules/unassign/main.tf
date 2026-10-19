@@ -215,9 +215,20 @@ data "aws_iam_policy_document" "lambda" {
       "scheduler:UpdateSchedule",
       "scheduler:DeleteSchedule",
       "scheduler:GetSchedule",
-      "scheduler:ListSchedules",
     ]
     resources = [local.schedules_arn]
+  }
+
+  statement {
+    sid     = "ListTenantSchedules"
+    effect  = "Allow"
+    actions = ["scheduler:ListSchedules"]
+    # AWS authorizes the list call against the account-level schedule resource,
+    # not the group's: scoped to `schedule/<prefix>-*/*` (as every other action
+    # here is) the call fails with AccessDenied naming
+    # "…:schedule/*/*" — which is what the add-in's schedule list and the
+    # service's own lookups hit, so the narrower form can never work.
+    resources = ["${local.scheduler_arn_prefix}:schedule/*/*"]
   }
 
   statement {
