@@ -12,6 +12,8 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "build:addin": "node build/inline-core.mjs",
-    "check:addin": "node build/inline-core.mjs --check"
+    "check:addin": "node build/inline-core.mjs --check",
+    "hooks:install": "sh scripts/install-git-hooks.sh",
+    "prepare": "sh scripts/install-git-hooks.sh"
   }
 }

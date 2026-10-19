@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Repository hook (git core.hooksPath=.githooks, installed by scripts/install-git-hooks.sh).
+set -uo pipefail
+
+script="$(dirname "$0")/../scripts/guard/commit-msg.mjs"
+if [ ! -f "$script" ]; then
+  echo "commit-msg: $script is missing (a branch or commit from before the change gate?)." >&2
+  echo "Check out a branch that contains scripts/guard/, or drop the hook config with:" >&2
+  echo "  git config --unset core.hooksPath" >&2
+  exit 1
+fi
+
+exec node "$script" "$@"

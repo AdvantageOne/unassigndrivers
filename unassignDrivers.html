@@ -75,8 +75,6 @@
           </div>
         </div>
         <div class="a1ud-form">
-          <label class="a1ud-check a1ud-span2"><input type="checkbox" id="a1ud-enabled"> Schedule enabled</label>
-
           <label>Repeat
             <select id="a1ud-mode">
               <option value="daily">Every day</option>
@@ -137,25 +135,17 @@
             <h2>Scheduled runs</h2>
           </div>
         </div>
-        <p class="a1ud-muted">These run on Advantage One's scheduler, so they fire even when nobody has MyGeotab open. Saving above creates or updates a schedule; the table below shows everything currently scheduled for this database.</p>
+        <p class="a1ud-muted">These run on Advantage One's scheduler, so they fire even when nobody has MyGeotab open. Saving above creates or updates a schedule — pick <em>Repeat: One time</em> for a single run — and the table below shows everything currently scheduled for this database.</p>
         <div class="a1ud-actions">
           <button type="button" class="a1ud-btn a1ud-secondary" id="a1ud-schedules-refresh">Refresh</button>
           <span id="a1ud-schedules-msg" class="a1ud-muted"></span>
+          <span id="a1ud-editmsg" class="a1ud-muted"></span>
         </div>
         <div class="a1ud-tablewrap">
           <table class="a1ud-table" id="a1ud-schedules">
             <thead><tr><th>When</th><th>Assets</th><th>Kind</th><th>Next run</th><th title="Skip assets that are driving at run time">Skip driving</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
-        </div>
-        <div class="a1ud-form">
-          <label class="a1ud-span2">Run once at <span class="a1ud-muted">(this database's time zone)</span>
-            <input type="datetime-local" id="a1ud-runat">
-          </label>
-          <div class="a1ud-actions">
-            <button type="button" class="a1ud-btn a1ud-secondary" id="a1ud-addrun">Add one-time run</button>
-            <span id="a1ud-editmsg" class="a1ud-muted"></span>
-          </div>
         </div>
       </section>
 
@@ -1196,7 +1186,6 @@ geotab.addin.unassignDrivers = function () {
     }
     tzSel.value = tz;
     if (!s) { syncModeVisibility(); return; }
-    $("a1ud-enabled").checked = !!s.enabled;
     $("a1ud-mode").value = s.mode || "daily";
     $("a1ud-time").value = s.time || "23:00";
     $("a1ud-oncedate").value = s.onceDate || "";
@@ -1217,7 +1206,10 @@ geotab.addin.unassignDrivers = function () {
   function readForm() {
     var mode = $("a1ud-mode").value;
     var s = {
-      enabled: $("a1ud-enabled").checked,
+      // Saving is what puts a schedule in place, and the list below is where one
+      // is taken out again: there is no separate "enabled" flag to set, so a
+      // saved schedule is always on.
+      enabled: true,
       mode: mode,
       time: $("a1ud-time").value,
       timeZone: $("a1ud-tz").value,
@@ -1231,7 +1223,7 @@ geotab.addin.unassignDrivers = function () {
     if (mode === "weekly" && !s.days.length) throw new Error("Pick at least one day.");
     if (mode === "once" && !s.onceDate) throw new Error("Pick a date.");
     if ($("a1ud-scope").value === "groups" && !s.scope.groupIds.length) throw new Error("Pick at least one group, or choose All assets.");
-    if (s.enabled && !core.nextOccurrence(s, new Date())) throw new Error("That date and time is already in the past.");
+    if (!core.nextOccurrence(s, new Date())) throw new Error("That date and time is already in the past.");
     return s;
   }
 
@@ -1537,14 +1529,43 @@ geotab.addin.unassignDrivers = function () {
       .then(function () { button.disabled = false; });
   }
 
+  /**
+   * The form in the service's terms. "One time" is not a recurring plan, so it
+   * carries the date the recurrence modes have no use for; the date and the time
+   * are separate fields here and are joined where the one-time run is sent.
+   */
   function serverSchedulePayload() {
+    var mode = $("a1ud-mode").value;
     return {
-      mode: $("a1ud-mode").value,
+      mode: mode,
       time: $("a1ud-time").value,
       timeZone: $("a1ud-tz").value,
+      onceDate: mode === "once" ? $("a1ud-oncedate").value : null,
       days: Array.prototype.map.call($$("#a1ud-days input:checked"), function (i) { return +i.value; }),
       scope: { groupIds: currentScopeIds() },
       skipDriving: $("a1ud-skipdriving").checked
+    };
+  }
+
+  /** The one-time plan as the shared core reads it, for the "in the past" check. */
+  function oneTimePlan(payload) {
+    return {
+      enabled: true,
+      mode: "once",
+      time: payload.time,
+      onceDate: payload.onceDate,
+      timeZone: payload.timeZone,
+      days: []
+    };
+  }
+
+  /** The one-time run as the service reads it: a single wall-clock instant. */
+  function oneTimeRunPayload(payload) {
+    return {
+      at: payload.onceDate + "T" + payload.time,
+      timeZone: payload.timeZone,
+      scope: payload.scope,
+      skipDriving: payload.skipDriving
     };
   }
 
@@ -1564,11 +1585,14 @@ geotab.addin.unassignDrivers = function () {
 
   function saveOnServer(msg) {
     var payload;
+    var oneTime;
     try {
       payload = serverSchedulePayload();
-      if (!$("a1ud-enabled").checked) throw new Error("Turn the schedule on to save it, or delete it from the list below.");
+      oneTime = payload.mode === "once";
       if (!/^\d{2}:\d{2}$/.test(payload.time)) throw new Error("Pick a time.");
       if (payload.mode === "weekly" && !payload.days.length) throw new Error("Pick at least one day.");
+      if (oneTime && !payload.onceDate) throw new Error("Pick a date.");
+      if (oneTime && !core.nextOccurrence(oneTimePlan(payload), new Date())) throw new Error("That date and time is already in the past.");
       if ($("a1ud-scope").value === "groups" && !payload.scope.groupIds.length) throw new Error("Pick at least one group, or choose All assets.");
     } catch (e) {
       msg.textContent = e.message;
@@ -1576,13 +1600,18 @@ geotab.addin.unassignDrivers = function () {
     }
     $("a1ud-save").disabled = true;
     msg.textContent = "Saving…";
-    var request = editingName
-      ? serverClient().updateSchedule(Object.assign({ name: editingName }, payload))
-      : serverClient().createSchedule(payload);
+    // A one-time run is a schedule of its own, not an edit of a recurring plan —
+    // the service refuses to update one — so it is only ever added, and never
+    // becomes the thing a later Save would edit.
+    var request = oneTime
+      ? serverClient().addRun(oneTimeRunPayload(payload))
+      : editingName
+        ? serverClient().updateSchedule(Object.assign({ name: editingName }, payload))
+        : serverClient().createSchedule(payload);
     return request
       .then(function (data) {
-        if (data && data.name) editingName = data.name;
-        msg.textContent = "Saved.";
+        if (!oneTime && data && data.name) editingName = data.name;
+        msg.textContent = oneTime ? "One-time run added." : "Saved.";
         return refreshSchedules();
       })
       .catch(function (e) { msg.textContent = serverMessage(e); })
@@ -1637,9 +1666,18 @@ geotab.addin.unassignDrivers = function () {
       });
   }
 
+  /**
+   * The plan in words, with the zone its wall clock is read in. A one-time run
+   * has no wall clock — it is a single instant — and the 00:00 the service keeps
+   * in its spec is a placeholder, so it names no time here: when it runs is the
+   * next-run column, in the zone it was scheduled in.
+   */
   function scheduleWords(schedule) {
     if (schedule.kind === "one-time") return "Once";
-    return schedule.mode === "weekly" ? "Weekly (" + (schedule.days || []).join(",") + ")" : "Every day";
+    var words = schedule.mode === "weekly" ? "Weekly (" + (schedule.days || []).join(",") + ")" : "Every day";
+    if (schedule.time) words += " at " + schedule.time;
+    if (schedule.timeZone) words += " (" + schedule.timeZone + ")";
+    return words;
   }
 
   /** Yes/No as the preview table writes it: a tag when on, plain when off. */
@@ -1662,11 +1700,13 @@ geotab.addin.unassignDrivers = function () {
     tb.innerHTML = list
       .map(function (s) {
         var assets = s.scope && s.scope.groupIds && s.scope.groupIds.length ? s.scope.groupIds.length + " group(s)" : "All assets";
-        return "<tr><td>" + esc(scheduleWords(s)) + " " + esc(s.time || "") + "</td><td>" + esc(assets) + "</td><td>" +
+        return "<tr><td>" + esc(scheduleWords(s)) + "</td><td>" + esc(assets) + "</td><td>" +
           esc(s.kind) + "</td><td>" + esc(s.nextRun ? fmt(new Date(s.nextRun), s.timeZone) : "—") + "</td><td>" +
           yesNoTag(s.skipDriving !== false) +
           "</td><td>" +
-          '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-edit" data-name="' + esc(s.name) + '">Edit</button> ' +
+          // A one-time run is not editable — the service refuses, and it has no
+          // recurrence to edit — so it offers only Delete.
+          (s.kind === "one-time" ? "" : '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-edit" data-name="' + esc(s.name) + '">Edit</button> ') +
           '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-delete" data-name="' + esc(s.name) + '">Delete</button>' +
           "</td></tr>";
       })
@@ -1709,28 +1749,6 @@ geotab.addin.unassignDrivers = function () {
       .catch(function (e) { $("a1ud-editmsg").textContent = serverMessage(e); });
   }
 
-  function onAddRun() {
-    var value = $("a1ud-runat").value;
-    if (!value) {
-      $("a1ud-editmsg").textContent = "Pick a date and time for the one-time run.";
-      return Promise.resolve();
-    }
-    $("a1ud-editmsg").textContent = "Adding…";
-    return serverClient()
-      .addRun({
-        at: value,
-        timeZone: $("a1ud-tz").value,
-        scope: { groupIds: currentScopeIds() },
-        skipDriving: $("a1ud-skipdriving").checked
-      })
-      .then(function () {
-        $("a1ud-runat").value = "";
-        $("a1ud-editmsg").textContent = "One-time run added.";
-        return refreshSchedules();
-      })
-      .catch(function (e) { $("a1ud-editmsg").textContent = serverMessage(e); });
-  }
-
   function bindServerControls() {
     // MyGeotab rebuilds the add-in's page element when the user navigates, and
     // listeners live on the elements they were attached to: rebinding only when
@@ -1738,7 +1756,6 @@ geotab.addin.unassignDrivers = function () {
     if (!serverMode() || serverBoundRoot === root) return;
     serverBoundRoot = root;
     $("a1ud-schedules-refresh").addEventListener("click", function () { refreshSchedules(); });
-    $("a1ud-addrun").addEventListener("click", function () { onAddRun(); });
     $("a1ud-worker-save").addEventListener("click", function () { onSaveWorker(); });
     $("a1ud-schedules").addEventListener("click", function (event) {
       var target = event.target;

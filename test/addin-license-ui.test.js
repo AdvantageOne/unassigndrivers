@@ -15,6 +15,9 @@ const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const core = require("../src/core/unassign-core");
+const actions = require("../src/lambda/actions/schedules");
+const { createScheduler } = require("../src/lambda/lib/scheduler");
+const { createFakeSchedulerClient, createFakeConfig } = require("./support/fakes");
 
 const HTML = join(__dirname, "..", "unassignDrivers.html");
 const realSetTimeout = setTimeout;
@@ -113,7 +116,18 @@ function fakeElement(id, registry, hidden) {
 function load(options) {
   const settings = options || {};
   const elements = new Map();
-  const calls = { license: 0, listSchedules: 0, listRuns: 0, saveWorkerCredentials: 0 };
+  const calls = {
+    license: 0,
+    listSchedules: 0,
+    listRuns: 0,
+    saveWorkerCredentials: 0,
+    createSchedule: 0,
+    updateSchedule: 0,
+    addRun: 0,
+    deleteSchedule: 0,
+    // Every AddInData write the page makes (legacy mode keeps schedules in Geotab).
+    addInDataWrites: []
+  };
   const started = [];
   // The page arms timers (the refresh after a scheduled slot fires); the harness
   // records them so a test can fire one without waiting for it.
@@ -143,10 +157,26 @@ function load(options) {
       calls.saveWorkerCredentials += 1;
       return settings.saved || { name: "unassign/advone_matt_dev1/serviceaccount" };
     },
-    addRun: async () => ({}),
-    deleteSchedule: async () => ({}),
-    createSchedule: async () => ({}),
-    updateSchedule: async () => ({}),
+    addRun: async (payload) => {
+      calls.addRun += 1;
+      calls.addRunPayload = payload;
+      return {};
+    },
+    deleteSchedule: async (payload) => {
+      calls.deleteSchedule += 1;
+      calls.deleteSchedulePayload = payload;
+      return {};
+    },
+    createSchedule: async (payload) => {
+      calls.createSchedule += 1;
+      calls.createSchedulePayload = payload;
+      return {};
+    },
+    updateSchedule: async (payload) => {
+      calls.updateSchedule += 1;
+      calls.updateSchedulePayload = payload;
+      return {};
+    },
     unassign: async () => ({ unassigned: 0, skipped: 0, failed: 0, stillAssigned: 0 }),
     listAssignments: async () => ({ rows: [] }),
     // The deployment's own record of what it ran, merged into the history.
@@ -159,7 +189,10 @@ function load(options) {
   };
 
   const api = {
-    call: (method, params, ok) => ok(params && params.typeName === "User" ? [EVERYTHING] : []),
+    call: (method, params, ok) => {
+      if (params && params.typeName === "AddInData" && params.entity) calls.addInDataWrites.push({ method, params });
+      return ok(params && params.typeName === "User" ? [EVERYTHING] : []);
+    },
     multiCall: (calls_, ok) => ok(calls_.map(() => [])),
     getSession: (callback) => callback({ userName: settings.userName || STAFF, database: "advone_matt_dev1", server: "my.geotab.com" })
   };
@@ -298,6 +331,25 @@ test("legacy mode never calls the service and reveals nothing new", async () => 
   assert.equal(h.calls.listSchedules, 0);
   assert.equal(h.visible("a1ud-license-modal"), false);
   assert.equal(h.visible("a1ud-setup-card"), false);
+});
+
+test("legacy mode saves a schedule enabled, with no control that could say otherwise", async () => {
+  assert.doesNotMatch(addinHtml(), /id="a1ud-enabled"/, "there is no enabled control left to set");
+
+  const h = await start({ baseUrl: "", license: STAFF_REGISTERED });
+  h.element("a1ud-mode").value = "daily";
+  h.element("a1ud-time").value = "22:45";
+  h.element("a1ud-tz").value = "UTC";
+
+  h.click("a1ud-save");
+  await settle();
+
+  assert.equal(h.element("a1ud-savemsg").textContent, "Saved.");
+  assert.equal(h.calls.addInDataWrites.length, 1, "saving writes one schedule record");
+  const schedule = h.calls.addInDataWrites[0].params.entity.details;
+  assert.equal(schedule.type, "schedule");
+  assert.equal(schedule.time, "22:45");
+  assert.equal(schedule.enabled, true, "putting a schedule in place is what turns it on");
 });
 
 test("saving the service account registers the database and hands back the schedules", async () => {
@@ -482,7 +534,6 @@ test("saving a schedule puts its time in the header without a reload", async () 
   const h = await start({ license: TENANT_LICENSED, userName: TENANT });
   assert.equal(h.element("a1ud-next").textContent, "Not scheduled");
 
-  h.element("a1ud-enabled").checked = true;
   h.element("a1ud-mode").value = "daily";
   h.element("a1ud-time").value = "22:45";
   h.element("a1ud-tz").value = "UTC";
@@ -493,6 +544,70 @@ test("saving a schedule puts its time in the header without a reload", async () 
 
   assert.equal(h.calls.listSchedules, 2, "the save re-reads what the deployment now holds");
   assert.match(h.element("a1ud-countdown").textContent, /every day at 22:45/);
+});
+
+test("picking One time in the form creates a one-time run on the deployment's scheduler", async () => {
+  const h = await start({ license: TENANT_LICENSED, userName: TENANT });
+
+  // A week out: always in the future, never today.
+  const date = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  h.element("a1ud-mode").value = "once";
+  h.element("a1ud-time").value = "20:00";
+  h.element("a1ud-tz").value = "America/Edmonton";
+  h.element("a1ud-oncedate").value = date;
+  h.element("a1ud-skipdriving").checked = true; // the markup ships this on
+  // What the deployment holds once the run is added, so the header can report it.
+  h.settings.schedules = {
+    schedules: [{ name: "run-x", kind: "one-time", state: "ENABLED", timeZone: "America/Edmonton", nextRun: date + "T20:00:00.000Z" }]
+  };
+
+  h.click("a1ud-save");
+  await settle();
+
+  // "once" is not a recurrence the service can store: a recurring save carrying
+  // it is refused outright, which is how the run used to create nothing at all.
+  assert.equal(h.calls.createSchedule, 0, "a one-time run is not a recurring schedule");
+  assert.equal(h.calls.updateSchedule, 0);
+  assert.equal(h.calls.addRun, 1);
+  assert.deepEqual(h.calls.addRunPayload, {
+    at: date + "T20:00",
+    timeZone: "America/Edmonton",
+    scope: { groupIds: [] },
+    skipDriving: true
+  });
+  assert.equal(h.element("a1ud-savemsg").textContent, "One-time run added.");
+  assert.match(h.element("a1ud-countdown").textContent, /a one-time run/, "the header reports it without a reload");
+
+  // That payload through the real action: this is what puts a schedule in
+  // EventBridge. The instant is the tenant's wall clock, converted as the
+  // service converts it.
+  const client = createFakeSchedulerClient();
+  const config = createFakeConfig();
+  const run = await actions.addRun(
+    {
+      session: { database: "advone_matt_dev1", userName: TENANT, sessionId: "session-1", server: "my.geotab.com" },
+      config,
+      customer: config.customers.tenant_a, // a time-zone default only; the form sends its own
+      scheduler: createScheduler({
+        client,
+        groupPrefix: "UnassignDriverSchedules",
+        targetArn: "arn:aws:lambda:ca-central-1:000000000000:function:advone-unassign-api",
+        roleArn: "arn:aws:iam::000000000000:role/advone-unassign-advone-ca-central-scheduler",
+        retry: { maxAttempts: 2, maxAgeSeconds: 3600 }
+      }),
+      now: () => new Date(),
+      logger: null,
+      requestId: "test"
+    },
+    h.calls.addRunPayload
+  );
+
+  const parts = date.split("-").map(Number);
+  const at = core.zonedToUtc(parts[0], parts[1], parts[2], 20, 0, "America/Edmonton");
+  const stored = client.schedules.get(`UnassignDriverSchedules-advone_matt_dev1/${run.name}`);
+  assert.equal(stored.ScheduleExpression, `at(${at.toISOString().replace(/\.\d{3}Z$/, "")})`);
+  assert.equal(stored.ActionAfterCompletion, "DELETE", "a one-time run removes itself once it has fired");
+  assert.equal(stored.State, "ENABLED");
 });
 
 /* ---------------- the schedule table's columns ---------------- */
@@ -516,6 +631,25 @@ test("the table says whether driving assets are skipped, per schedule", async ()
   // The flag is a plan property, so it shows for a one-time run too: absent in
   // the payload means the default, which is to skip.
   assert.equal((rows.match(/<td>/g) || []).length, 3 * 6, "six cells per row, no more");
+});
+
+test("the table reads every time in the zone its schedule was created in", async () => {
+  const h = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    schedules: {
+      schedules: [
+        DAILY_2300,
+        { name: "run-20261120T220000Z-ab12cd34", kind: "one-time", state: "ENABLED", timeZone: "America/Vancouver", nextRun: "2026-11-20T22:00:00.000Z" }
+      ]
+    }
+  });
+
+  const rows = h.element("a1ud-schedules tbody").innerHTML;
+  assert.match(rows, /<td>Every day at 23:00 \(America\/Edmonton\)<\/td>/, "the wall clock names the zone it is read in");
+  assert.match(rows, /<td>Once<\/td>/, "a one-time run is one instant, so it has no wall clock to show");
+  assert.doesNotMatch(rows, /00:00/, "the placeholder time the service keeps for a one-time run is not a time");
+  assert.doesNotMatch(rows, /UTC/, "no run is reported in a zone it was not scheduled in");
 });
 
 test("the schedules table has no enabled column, and keeps its shape", () => {

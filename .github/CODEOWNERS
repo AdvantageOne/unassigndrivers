@@ -1,0 +1,33 @@
+# Who reviews what.
+#
+# Gated paths control the AWS side of the app (the Lambda service, its OpenTofu infrastructure, and
+# the tooling that deploys them). With branch protection on `main` and "Require review from Code
+# Owners" enabled, a change to any line below cannot merge without a dev-team approval — which is the
+# only gate a non-technical author cannot route around locally.
+#
+# Replace @jordan-advone with the dev-team handle if the team is ever a GitHub team slug.
+# Unlisted paths are the open zone: unassignDrivers.html, translations/, docs/, README.md.
+
+*                       @jordan-advone
+
+/infra/                 @jordan-advone
+/src/                   @jordan-advone
+/build/                 @jordan-advone
+/scripts/               @jordan-advone
+/test/                  @jordan-advone
+/unassigndrivers-runner/ @jordan-advone
+/scheduled-unassign.yml @jordan-advone
+
+/.github/               @jordan-advone
+/.githooks/             @jordan-advone
+/.omp/                  @jordan-advone
+/.claude/               @jordan-advone
+/AGENTS.md              @jordan-advone
+/CLAUDE.md              @jordan-advone
+
+/package.json           @jordan-advone
+/pnpm-lock.yaml         @jordan-advone
+/config.json            @jordan-advone
+/config.ca.json         @jordan-advone
+/config.us.json         @jordan-advone
+/config.pages.json      @jordan-advone

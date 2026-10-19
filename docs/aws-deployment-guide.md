@@ -253,7 +253,7 @@ scripts/offboard-customer.sh --region ca --delete-secret
 |---|---|
 | See a tenant's schedules | Add-in **Scheduled runs** table, or `aws scheduler list-schedules --group-name UnassignDriverSchedules-<db> --region <r>` |
 | Create or change a schedule | Add-in Scheduler tab → **Save Schedule** (the name is derived from scope + time, so saving the same plan updates it) |
-| Run once at a specific time | Add-in **Run once at** → **Add one-time run** |
+| Run once at a specific time | Add-in Scheduler tab → **Repeat: One time**, pick the date, **Save Schedule** |
 | Run everything now | Add-in **Unassign All Now**, or invoke the Lambda with a session payload |
 | Prove a deployment is alive | `aws lambda invoke --function-name advone-unassign-api --payload '{"action":"health"}' out.json --region <r> && cat out.json` |
 | Turn off one tenant in an emergency | Set `customers.<db>.enabled = false` in the config; or `aws scheduler update-schedule … --state DISABLED` per schedule; or delete the tenant's schedule group |

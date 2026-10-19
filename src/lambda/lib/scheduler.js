@@ -234,11 +234,18 @@ function createScheduler(options) {
       group: schedule.GroupName || schedule.group || null,
       state: schedule.State || "ENABLED",
       expression: schedule.ScheduleExpression || null,
-      timeZone: schedule.ScheduleExpressionTimezone || spec.timeZone || null,
+      // The zone the plan was created in, from the stored payload: a one-time
+      // run's `at(...)` instant is absolute, so the field we leave unset comes
+      // back from EventBridge as its own default ("UTC") — which would report a
+      // tenant's 2 p.m. run as 9 p.m.
+      timeZone: spec.timeZone || schedule.ScheduleExpressionTimezone || null,
       kind: oneTime ? "one-time" : "recurring",
       scope: { groupIds: payload.group_ids || [] },
       mode: spec.mode || null,
-      time: spec.time || null,
+      // A one-time run's spec keeps a placeholder time (00:00); its instant is
+      // `onceAt`, which is what `nextRun` reports, so naming a time here would
+      // be naming one that never runs.
+      time: oneTime ? null : spec.time || null,
       days: spec.days || [],
       skipDriving: payload.skip_driving !== false,
       nextRun,
