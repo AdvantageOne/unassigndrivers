@@ -524,3 +524,21 @@ test("the schedules table has no enabled column, and keeps its shape", () => {
   assert.equal((head.match(/<th[ >]/g) || []).length, 6, "one header cell per column");
   assert.match(html.slice(start_, html.indexOf("</table>", start_)), /<th>When<\/th>/);
 });
+
+/* ---------------- the brand links ---------------- */
+
+test("the logo and the brand line both link to the website", () => {
+  const html = addinHtml();
+  const logoAt = html.indexOf('class="a1ud-logo-link"');
+  const logo = html.slice(logoAt, html.indexOf("</a>", logoAt));
+  assert.match(logo, /href="https:\/\/advantageone\.tech"/);
+  assert.match(logo, /class="a1ud-logo"/, "the logo is the link's content");
+  assert.match(logo, /rel="noopener"/, "a new tab, not the add-in's own frame");
+
+  const brandAt = html.indexOf('class="a1ud-footer-brand"');
+  const brand = html.slice(brandAt, html.indexOf("</div>", brandAt));
+  assert.match(brand, /href="https:\/\/advantageone\.tech"/);
+  assert.match(brand, /<strong>Fleet infrastructure, engineered around your operations\.<\/strong>/);
+  assert.match(brand, /<span>Geotab Elite Specialized Partner<\/span>/);
+  assert.match(brand, /rel="noopener"/, "and the same for the brand line");
+});
