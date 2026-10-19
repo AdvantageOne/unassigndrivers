@@ -488,3 +488,39 @@ test("saving a schedule puts its time in the header without a reload", async () 
   assert.equal(h.calls.listSchedules, 2, "the save re-reads what the deployment now holds");
   assert.match(h.element("a1ud-countdown").textContent, /every day at 22:45/);
 });
+
+/* ---------------- the schedule table's columns ---------------- */
+
+test("the table says whether driving assets are skipped, per schedule", async () => {
+  const h = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    schedules: {
+      schedules: [
+        Object.assign({}, DAILY_2300, { skipDriving: true }),
+        { name: "all-0600-ffff0000", kind: "recurring", mode: "daily", time: "06:00", days: [], timeZone: "UTC", skipDriving: false },
+        { name: "run-20261120T080000Z-ab12cd34", kind: "one-time", nextRun: "2026-11-20T08:00:00.000Z" }
+      ]
+    }
+  });
+
+  const rows = h.element("a1ud-schedules tbody").innerHTML;
+  assert.equal((rows.match(/class="a1ud-tag is-yes">Yes</g) || []).length, 2, "two schedules skip driving assets");
+  assert.match(rows, /class="a1ud-tag">No</, "and one does not");
+  // The flag is a plan property, so it shows for a one-time run too: absent in
+  // the payload means the default, which is to skip.
+  assert.equal((rows.match(/<td>/g) || []).length, 3 * 6, "six cells per row, no more");
+});
+
+test("the schedules table has no enabled column, and keeps its shape", () => {
+  const html = addinHtml();
+  const start_ = html.indexOf('id="a1ud-schedules"');
+  const head = html.slice(start_, html.indexOf("</thead>", start_));
+
+  assert.match(head, /<th title="Skip assets that are driving at run time">Skip driving<\/th>/);
+  assert.doesNotMatch(head, /<th>State<\/th>/, "creating a schedule is what enables it");
+  // The empty state and the row renderer both write six cells, so the header
+  // must keep six columns.
+  assert.equal((head.match(/<th[ >]/g) || []).length, 6, "one header cell per column");
+  assert.match(html.slice(start_, html.indexOf("</table>", start_)), /<th>When<\/th>/);
+});

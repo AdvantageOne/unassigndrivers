@@ -142,7 +142,7 @@
         </div>
         <div class="a1ud-tablewrap">
           <table class="a1ud-table" id="a1ud-schedules">
-            <thead><tr><th>When</th><th>Assets</th><th>Kind</th><th>Next run</th><th>State</th><th></th></tr></thead>
+            <thead><tr><th>When</th><th>Assets</th><th>Kind</th><th>Next run</th><th title="Skip assets that are driving at run time">Skip driving</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -1617,6 +1617,17 @@ geotab.addin.unassignDrivers = function () {
     return schedule.mode === "weekly" ? "Weekly (" + (schedule.days || []).join(",") + ")" : "Every day";
   }
 
+  /** Yes/No as the preview table writes it: a tag when on, plain when off. */
+  function yesNoTag(on) {
+    return '<span class="a1ud-tag' + (on ? " is-yes" : "") + '">' + (on ? "Yes" : "No") + "</span>";
+  }
+
+  /**
+   * One row per schedule for this database. There is no "enabled" column: saving
+   * a schedule is what creates it, and nothing here switches one off — so the
+   * column that used to state that said less than what the schedule does with an
+   * asset that happens to be driving when it fires.
+   */
   function renderSchedules(list) {
     var tb = $("a1ud-schedules").querySelector("tbody");
     if (!list.length) {
@@ -1627,7 +1638,8 @@ geotab.addin.unassignDrivers = function () {
       .map(function (s) {
         var assets = s.scope && s.scope.groupIds && s.scope.groupIds.length ? s.scope.groupIds.length + " group(s)" : "All assets";
         return "<tr><td>" + esc(scheduleWords(s)) + " " + esc(s.time || "") + "</td><td>" + esc(assets) + "</td><td>" +
-          esc(s.kind) + "</td><td>" + esc(s.nextRun ? fmt(new Date(s.nextRun), s.timeZone) : "—") + "</td><td>" + esc(s.state) +
+          esc(s.kind) + "</td><td>" + esc(s.nextRun ? fmt(new Date(s.nextRun), s.timeZone) : "—") + "</td><td>" +
+          yesNoTag(s.skipDriving !== false) +
           "</td><td>" +
           '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-edit" data-name="' + esc(s.name) + '">Edit</button> ' +
           '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-delete" data-name="' + esc(s.name) + '">Delete</button>' +
