@@ -1537,14 +1537,43 @@ geotab.addin.unassignDrivers = function () {
       .then(function () { button.disabled = false; });
   }
 
+  /**
+   * The form in the service's terms. "One time" is not a recurring plan, so it
+   * carries the date the recurrence modes have no use for; the date and the time
+   * are separate fields here and are joined where the one-time run is sent.
+   */
   function serverSchedulePayload() {
+    var mode = $("a1ud-mode").value;
     return {
-      mode: $("a1ud-mode").value,
+      mode: mode,
       time: $("a1ud-time").value,
       timeZone: $("a1ud-tz").value,
+      onceDate: mode === "once" ? $("a1ud-oncedate").value : null,
       days: Array.prototype.map.call($$("#a1ud-days input:checked"), function (i) { return +i.value; }),
       scope: { groupIds: currentScopeIds() },
       skipDriving: $("a1ud-skipdriving").checked
+    };
+  }
+
+  /** The one-time plan as the shared core reads it, for the "in the past" check. */
+  function oneTimePlan(payload) {
+    return {
+      enabled: true,
+      mode: "once",
+      time: payload.time,
+      onceDate: payload.onceDate,
+      timeZone: payload.timeZone,
+      days: []
+    };
+  }
+
+  /** The one-time run as the service reads it: a single wall-clock instant. */
+  function oneTimeRunPayload(payload) {
+    return {
+      at: payload.onceDate + "T" + payload.time,
+      timeZone: payload.timeZone,
+      scope: payload.scope,
+      skipDriving: payload.skipDriving
     };
   }
 
@@ -1564,11 +1593,15 @@ geotab.addin.unassignDrivers = function () {
 
   function saveOnServer(msg) {
     var payload;
+    var oneTime;
     try {
       payload = serverSchedulePayload();
+      oneTime = payload.mode === "once";
       if (!$("a1ud-enabled").checked) throw new Error("Turn the schedule on to save it, or delete it from the list below.");
       if (!/^\d{2}:\d{2}$/.test(payload.time)) throw new Error("Pick a time.");
       if (payload.mode === "weekly" && !payload.days.length) throw new Error("Pick at least one day.");
+      if (oneTime && !payload.onceDate) throw new Error("Pick a date.");
+      if (oneTime && !core.nextOccurrence(oneTimePlan(payload), new Date())) throw new Error("That date and time is already in the past.");
       if ($("a1ud-scope").value === "groups" && !payload.scope.groupIds.length) throw new Error("Pick at least one group, or choose All assets.");
     } catch (e) {
       msg.textContent = e.message;
@@ -1576,13 +1609,18 @@ geotab.addin.unassignDrivers = function () {
     }
     $("a1ud-save").disabled = true;
     msg.textContent = "Saving…";
-    var request = editingName
-      ? serverClient().updateSchedule(Object.assign({ name: editingName }, payload))
-      : serverClient().createSchedule(payload);
+    // A one-time run is a schedule of its own, not an edit of a recurring plan —
+    // the service refuses to update one — so it is only ever added, and never
+    // becomes the thing a later Save would edit.
+    var request = oneTime
+      ? serverClient().addRun(oneTimeRunPayload(payload))
+      : editingName
+        ? serverClient().updateSchedule(Object.assign({ name: editingName }, payload))
+        : serverClient().createSchedule(payload);
     return request
       .then(function (data) {
-        if (data && data.name) editingName = data.name;
-        msg.textContent = "Saved.";
+        if (!oneTime && data && data.name) editingName = data.name;
+        msg.textContent = oneTime ? "One-time run added." : "Saved.";
         return refreshSchedules();
       })
       .catch(function (e) { msg.textContent = serverMessage(e); })
@@ -1666,7 +1704,9 @@ geotab.addin.unassignDrivers = function () {
           esc(s.kind) + "</td><td>" + esc(s.nextRun ? fmt(new Date(s.nextRun), s.timeZone) : "—") + "</td><td>" +
           yesNoTag(s.skipDriving !== false) +
           "</td><td>" +
-          '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-edit" data-name="' + esc(s.name) + '">Edit</button> ' +
+          // A one-time run is not editable — the service refuses, and it has no
+          // recurrence to edit — so it offers only Delete.
+          (s.kind === "one-time" ? "" : '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-edit" data-name="' + esc(s.name) + '">Edit</button> ') +
           '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-delete" data-name="' + esc(s.name) + '">Delete</button>' +
           "</td></tr>";
       })
