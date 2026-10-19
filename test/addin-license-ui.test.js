@@ -124,7 +124,9 @@ function load(options) {
     createSchedule: 0,
     updateSchedule: 0,
     addRun: 0,
-    deleteSchedule: 0
+    deleteSchedule: 0,
+    // Every AddInData write the page makes (legacy mode keeps schedules in Geotab).
+    addInDataWrites: []
   };
   const started = [];
   // The page arms timers (the refresh after a scheduled slot fires); the harness
@@ -187,7 +189,10 @@ function load(options) {
   };
 
   const api = {
-    call: (method, params, ok) => ok(params && params.typeName === "User" ? [EVERYTHING] : []),
+    call: (method, params, ok) => {
+      if (params && params.typeName === "AddInData" && params.entity) calls.addInDataWrites.push({ method, params });
+      return ok(params && params.typeName === "User" ? [EVERYTHING] : []);
+    },
     multiCall: (calls_, ok) => ok(calls_.map(() => [])),
     getSession: (callback) => callback({ userName: settings.userName || STAFF, database: "advone_matt_dev1", server: "my.geotab.com" })
   };
@@ -326,6 +331,25 @@ test("legacy mode never calls the service and reveals nothing new", async () => 
   assert.equal(h.calls.listSchedules, 0);
   assert.equal(h.visible("a1ud-license-modal"), false);
   assert.equal(h.visible("a1ud-setup-card"), false);
+});
+
+test("legacy mode saves a schedule enabled, with no control that could say otherwise", async () => {
+  assert.doesNotMatch(addinHtml(), /id="a1ud-enabled"/, "there is no enabled control left to set");
+
+  const h = await start({ baseUrl: "", license: STAFF_REGISTERED });
+  h.element("a1ud-mode").value = "daily";
+  h.element("a1ud-time").value = "22:45";
+  h.element("a1ud-tz").value = "UTC";
+
+  h.click("a1ud-save");
+  await settle();
+
+  assert.equal(h.element("a1ud-savemsg").textContent, "Saved.");
+  assert.equal(h.calls.addInDataWrites.length, 1, "saving writes one schedule record");
+  const schedule = h.calls.addInDataWrites[0].params.entity.details;
+  assert.equal(schedule.type, "schedule");
+  assert.equal(schedule.time, "22:45");
+  assert.equal(schedule.enabled, true, "putting a schedule in place is what turns it on");
 });
 
 test("saving the service account registers the database and hands back the schedules", async () => {
@@ -510,7 +534,6 @@ test("saving a schedule puts its time in the header without a reload", async () 
   const h = await start({ license: TENANT_LICENSED, userName: TENANT });
   assert.equal(h.element("a1ud-next").textContent, "Not scheduled");
 
-  h.element("a1ud-enabled").checked = true;
   h.element("a1ud-mode").value = "daily";
   h.element("a1ud-time").value = "22:45";
   h.element("a1ud-tz").value = "UTC";
@@ -528,7 +551,6 @@ test("picking One time in the form creates a one-time run on the deployment's sc
 
   // A week out: always in the future, never today.
   const date = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
-  h.element("a1ud-enabled").checked = true;
   h.element("a1ud-mode").value = "once";
   h.element("a1ud-time").value = "20:00";
   h.element("a1ud-tz").value = "America/Edmonton";
@@ -609,6 +631,25 @@ test("the table says whether driving assets are skipped, per schedule", async ()
   // The flag is a plan property, so it shows for a one-time run too: absent in
   // the payload means the default, which is to skip.
   assert.equal((rows.match(/<td>/g) || []).length, 3 * 6, "six cells per row, no more");
+});
+
+test("the table reads every time in the zone its schedule was created in", async () => {
+  const h = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    schedules: {
+      schedules: [
+        DAILY_2300,
+        { name: "run-20261120T220000Z-ab12cd34", kind: "one-time", state: "ENABLED", timeZone: "America/Vancouver", nextRun: "2026-11-20T22:00:00.000Z" }
+      ]
+    }
+  });
+
+  const rows = h.element("a1ud-schedules tbody").innerHTML;
+  assert.match(rows, /<td>Every day at 23:00 \(America\/Edmonton\)<\/td>/, "the wall clock names the zone it is read in");
+  assert.match(rows, /<td>Once<\/td>/, "a one-time run is one instant, so it has no wall clock to show");
+  assert.doesNotMatch(rows, /00:00/, "the placeholder time the service keeps for a one-time run is not a time");
+  assert.doesNotMatch(rows, /UTC/, "no run is reported in a zone it was not scheduled in");
 });
 
 test("the schedules table has no enabled column, and keeps its shape", () => {

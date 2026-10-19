@@ -157,6 +157,37 @@ test("toView reports a one-time run only while it is still ahead", async () => {
   assert.equal(after.nextRun, null);
 });
 
+test("toView reports the zone the run was scheduled in, not EventBridge's default", () => {
+  const { scheduler } = build();
+  const at = new Date("2026-10-16T08:00:00.000Z");
+  const plan = Object.assign({}, PLAN, {
+    oneTime: true,
+    at,
+    name: "run-20261016T080000Z-abcd1234",
+    spec: { mode: "once", time: "00:00", timeZone: "America/Vancouver", days: [], onceAt: at.toISOString() }
+  });
+  // Exactly what GetSchedule returns for a one-time run: an absolute instant,
+  // and EventBridge's own default in the field we deliberately leave unset — so
+  // the stored payload is the only record of the tenant's zone.
+  const view = scheduler.toView(
+    {
+      Name: plan.name,
+      GroupName: "UnassignDriverSchedules-simplot_prod",
+      ScheduleExpression: "at(2026-10-16T08:00:00)",
+      ScheduleExpressionTimezone: "UTC",
+      State: "ENABLED",
+      ActionAfterCompletion: "DELETE",
+      Target: { Input: scheduler.buildInput(plan) }
+    },
+    { now: new Date("2026-10-16T07:00:00.000Z") }
+  );
+
+  assert.equal(view.kind, "one-time");
+  assert.equal(view.timeZone, "America/Vancouver", "08:00Z is 01:00 in the zone the run was created in");
+  assert.equal(view.nextRun, at.toISOString());
+  assert.equal(view.time, null, "the placeholder 00:00 in the spec is not a time the run happens at");
+});
+
 test("the stored payload round-trips", () => {
   const { scheduler } = build();
   const input = scheduler.buildInput(Object.assign({}, PLAN, { name: "all-2300-abcdef12", scheduledTime: "2026-10-16T03:00:00.000Z" }));
