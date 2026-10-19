@@ -450,8 +450,13 @@ render_addin_html() { # <html file> <function url> -> HTML on stdout
   escaped="${escaped//&/\\&}"
   escaped="${escaped//|/\\|}"
   rendered="$(sed -E "s|var SERVER_API_BASE = \"[^\"]*\";|var SERVER_API_BASE = \"${escaped}\";|" "$src")" || return 2
-  printf '%s\n' "$rendered" | grep -qF "var SERVER_API_BASE = \"${url}\";" || return 3
-  printf '%s\n' "$rendered"
+  # Matched in the shell, never as `printf … | grep -q`: the page is larger than a
+  # pipe buffer, so grep -q exits at the match and printf dies of SIGPIPE, which
+  # pipefail then reports as a page that has no endpoint at all.
+  case "$rendered" in
+    *"var SERVER_API_BASE = \"${url}\";"*) printf '%s\n' "$rendered" ;;
+    *) return 3 ;;
+  esac
 }
 
 # The MyGeotab configuration an operator pastes in for a region: one committed
