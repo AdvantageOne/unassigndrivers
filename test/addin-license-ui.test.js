@@ -102,7 +102,10 @@ function fakeElement(id, registry, hidden) {
     },
     insertAdjacentHTML: () => {},
     getAttribute: () => null,
-    setAttribute: () => {}
+    setAttribute: () => {},
+    // The page brings the review into view when it loads; record that.
+    scrolled: null,
+    scrollIntoView: (options) => { element.scrolled = (options && options.block) || "start"; }
   };
   return element;
 }
@@ -112,6 +115,9 @@ function load(options) {
   const elements = new Map();
   const calls = { license: 0, listSchedules: 0, listRuns: 0, saveWorkerCredentials: 0 };
   const started = [];
+  // The page arms timers (the refresh after a scheduled slot fires); the harness
+  // records them so a test can fire one without waiting for it.
+  const timers = { timeouts: [] };
 
   const html = addinHtml();
   const hiddenAtStart = hiddenInMarkup(html);
@@ -179,7 +185,7 @@ function load(options) {
     console: { warn: () => {}, log: () => {} },
     setInterval: () => 0,
     clearInterval: () => {},
-    setTimeout: () => 0
+    setTimeout: (fn, ms) => { timers.timeouts.push({ fn, ms }); return timers.timeouts.length; }
   };
 
   const factory = new Function(
@@ -196,7 +202,7 @@ function load(options) {
   const rebuild = () => { elements.set("unassignDrivers", fakeElement("unassignDrivers", element)); };
   const click = (id) => element(id).fire("click");
 
-  return { addin, api, calls, click, element, visible, rebuild, settings };
+  return { addin, api, calls, click, element, visible, rebuild, settings, timers };
 }
 
 /** initialize() resolves its callback before startServerMode() finishes. */
@@ -216,12 +222,12 @@ test("staff on a database with no service account get the setup panel, not the o
   assert.equal(h.calls.license, 1);
   assert.equal(h.calls.listSchedules, 0, "nothing to list yet: asking only earns a refusal");
   assert.equal(h.visible("a1ud-app"), true);
-  assert.equal(h.visible("a1ud-setup-card"), true, "the panel that fixes this must be on screen");
-  assert.equal(h.visible("a1ud-tab-service"), true, "staff must land on the tab that holds the form");
-  assert.equal(h.visible("a1ud-tab-scheduler"), false);
+  assert.equal(h.visible("a1ud-setup-card"), true, "the panel that fixes this is still on the page");
+  assert.equal(h.visible("a1ud-tab-scheduler"), true, "and the page still opens on the review");
+  assert.equal(h.visible("a1ud-tab-service"), false, "the setup tab is one click away, not forced");
   assert.equal(h.visible("a1ud-license-modal"), false, "a missing registration is not a licence problem");
   assert.match(h.element("a1ud-worker-state").textContent, /No service account is configured yet/);
-  assert.match(h.element("a1ud-schedules-msg").textContent, /save a service account above/);
+  assert.match(h.element("a1ud-schedules-msg").textContent, /Service account setup tab/);
 });
 
 test("staff on a registered database keep the setup panel and see their schedules", async () => {
@@ -296,7 +302,7 @@ test("legacy mode never calls the service and reveals nothing new", async () => 
 
 test("saving the service account registers the database and hands back the schedules", async () => {
   const h = await start({ license: LICENSED_NOT_REGISTERED });
-  assert.equal(h.visible("a1ud-tab-service"), true);
+  assert.equal(h.visible("a1ud-tab-scheduler"), true, "the page opens on the review, setup panel or not");
 
   h.element("a1ud-worker-user").value = "svc-unassign@example.com";
   h.element("a1ud-worker-pass").value = "correct horse battery";
@@ -541,4 +547,79 @@ test("the logo and the brand line both link to the website", () => {
   assert.match(brand, /<strong>Fleet infrastructure, engineered around your operations\.<\/strong>/);
   assert.match(brand, /<span>Geotab Elite Specialized Partner<\/span>/);
   assert.match(brand, /rel="noopener"/, "and the same for the brand line");
+});
+
+/* ---------------- keeping the page current ---------------- */
+
+test("the audit trail has its own refresh, and reports what it read", async () => {
+  const h = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    runs: { runs: [{ at: new Date().toISOString(), trigger: "scheduled", by: "Unassign Service", outcome: "ran", unassigned: 3 }] }
+  });
+  assert.equal(h.calls.listRuns, 1, "loaded on the way in");
+
+  h.click("a1ud-history-refresh");
+  await settle();
+
+  assert.equal(h.calls.listRuns, 2, "the button re-reads the deployment's runs");
+  assert.match(h.element("a1ud-historymsg").textContent, /^Updated .* — 1 run$/);
+  assert.equal(h.element("a1ud-history-refresh").disabled, false, "and the button comes back");
+});
+
+test("the history refresh says when the deployment's runs could not be read", async () => {
+  const h = await start({
+    license: STAFF_REGISTERED,
+    errors: { listRuns: { code: "BAD_REQUEST", message: "Unknown action" } }
+  });
+
+  h.click("a1ud-history-refresh");
+  await settle();
+
+  assert.match(h.element("a1ud-historymsg").textContent, /the deployment's runs could not be read/);
+});
+
+test("the countdown running out re-reads the page ten seconds later", async () => {
+  const h = await start({
+    license: TENANT_LICENSED,
+    userName: TENANT,
+    schedules: {
+      // No mode or time: the instant the service computed is what counts, which
+      // lets this run a second from now instead of at the next minute boundary.
+      schedules: [{ name: "due-shortly", kind: "recurring", state: "ENABLED", nextRun: new Date(Date.now() + 1200).toISOString() }]
+    }
+  });
+  assert.match(h.element("a1ud-countdown").textContent, /^in /);
+
+  await new Promise((resolve) => realSetTimeout(resolve, 1400)); // let the instant pass
+  h.click("a1ud-schedules-refresh");                             // the render that notices
+  await settle();
+  const runsBefore = h.calls.listRuns;
+  const schedulesBefore = h.calls.listSchedules;
+
+  const armed = h.timers.timeouts.filter((t) => t.ms === 10000);
+  assert.equal(armed.length, 1, "one refresh armed, ten seconds after the slot");
+  armed[0].fn();
+  await settle();
+
+  assert.equal(h.calls.listRuns, runsBefore + 1, "it re-reads the audit trail");
+  assert.equal(h.calls.listSchedules, schedulesBefore + 1, "and the schedule the header shows");
+});
+
+test("the page opens on the review", async () => {
+  const licensed = await start({ license: TENANT_LICENSED, userName: TENANT });
+  assert.equal(licensed.element("a1ud-review").scrolled, "start", "the review is what the page is for");
+
+  // A database that still needs setting up keeps the same landing: the review is
+  // one step away, not hidden behind a form the page picked for the user.
+  const setup = await start({ license: LICENSED_NOT_REGISTERED });
+  assert.equal(setup.element("a1ud-review").scrolled, "start");
+  assert.equal(setup.visible("a1ud-tab-scheduler"), true);
+
+  // So does a rebuilt page element, which MyGeotab hands back on return.
+  const rebuilt = await start({ license: TENANT_LICENSED, userName: TENANT });
+  rebuilt.rebuild();
+  await rebuilt.addin.focus(rebuilt.api);
+  await settle();
+  assert.equal(rebuilt.element("a1ud-review").scrolled, "start");
 });

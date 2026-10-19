@@ -160,7 +160,7 @@
       </section>
 
       <!-- Preview / manual -->
-      <section class="a1ud-card">
+      <section class="a1ud-card" id="a1ud-review">
         <div class="a1ud-card-head">
           <span class="a1ud-icontile"><svg class="a1ud-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg></span>
           <div>
@@ -199,6 +199,10 @@
             <span class="a1ud-eyebrow">Audit trail</span>
             <h2>Run history</h2>
           </div>
+        </div>
+        <div class="a1ud-actions">
+          <button type="button" class="a1ud-btn a1ud-secondary" id="a1ud-history-refresh">Refresh</button>
+          <span id="a1ud-historymsg" class="a1ud-muted"></span>
         </div>
         <div class="a1ud-tablewrap">
           <table class="a1ud-table" id="a1ud-history">
@@ -1089,6 +1093,13 @@ geotab.addin.unassignDrivers = function () {
   // stays false until an answer arrives: the panel must never invent a time.
   var remoteSchedules = { known: false, list: [] };
   var schedulesFetchedAt = 0;
+  // The countdown running out means the slot fired on AWS, and a run needs a few
+  // seconds to finish and be written down before there is anything new to read.
+  var DUE_REFRESH_DELAY_MS = 10000;
+  var countingTo = null;   // the instant the header is counting down to
+  var refreshedFor = null; // ...and the last one the page refreshed for
+  var dueTimer = null;
+  var awsRunsError = null; // why the deployment's runs are absent, if they are
   var groups = [];
   var tickTimer = null, clockTimer = null, tickCount = 0;
   var running = false, wakeLock = null, lastRows = [];
@@ -1143,6 +1154,7 @@ geotab.addin.unassignDrivers = function () {
     $("a1ud-groupfilter").addEventListener("input", renderGroups);
     $("a1ud-save").addEventListener("click", onSave);
     $("a1ud-preview").addEventListener("click", onPreview);
+    $("a1ud-history-refresh").addEventListener("click", onRefreshHistory);
     $("a1ud-runnow").addEventListener("click", onRunNowAsk);
     $("a1ud-confirmyes").addEventListener("click", onRunNowConfirm);
     $("a1ud-confirmno").addEventListener("click", function () { show($("a1ud-confirmwrap"), false); $("a1ud-runnow").disabled = false; });
@@ -1286,6 +1298,14 @@ geotab.addin.unassignDrivers = function () {
    * what the user is owed.
    */
   function renderServerStatus() {
+    // The countdown running out means the schedule fired on AWS. Re-read once the
+    // run has had time to finish and be recorded — asking immediately would only
+    // show the run that has not happened yet.
+    if (countingTo !== null && Date.now() >= countingTo && refreshedFor !== countingTo) {
+      refreshedFor = countingTo;
+      countingTo = null;
+      armDueRefresh();
+    }
     if (!remoteSchedules.known) {
       // Not asked yet, or the ask was refused: claim nothing.
       return showNext("Managed on AWS", "Runs on our scheduler, with or without this page open.", "Idle");
@@ -1303,6 +1323,7 @@ geotab.addin.unassignDrivers = function () {
       );
     }
     var s = upcoming.schedule;
+    countingTo = upcoming.at;
     showNext(fmt(new Date(upcoming.at), s.timeZone), countdownText(upcoming.at - Date.now()) + " — " + scheduleWhen(s), "Armed");
   }
 
@@ -1321,7 +1342,7 @@ geotab.addin.unassignDrivers = function () {
     // run log (scheduled runs, and attempts that never reached Geotab). One run
     // the service performed is in both, so they are merged rather than listed
     // twice.
-    var entries = core.mergeRunHistory((records.log && records.log.details.entries) || [], awsRuns);
+    var entries = historyEntries();
     var tb = $("a1ud-history").querySelector("tbody");
     if (!entries.length) { tb.innerHTML = '<tr><td colspan="7" class="a1ud-muted">No runs yet</td></tr>'; return; }
     // A row that exists only in the deployment's log has counts, not the rows.
@@ -1452,9 +1473,9 @@ geotab.addin.unassignDrivers = function () {
       show($("a1ud-setup-card"), true);
       renderWorkerState(data);
       if (!data.onboarded) {
-        // Nothing is registered yet, so open the tab holding the form instead
-        // of leaving it to be found behind the scheduler.
-        showTab("service");
+        // Nothing is registered yet. The page still opens on the review — that is
+        // what it is for — and the fix is one tab away, named in the message the
+        // scheduler card shows.
         return "setup";
       }
       return "ready";
@@ -1743,7 +1764,7 @@ geotab.addin.unassignDrivers = function () {
       var state = applyLicense(data);
       if (state === "unlicensed") return null; // the overlay explains it
       if (state === "setup") {
-        $("a1ud-schedules-msg").textContent = "No schedules yet — save a service account above to register this database.";
+        $("a1ud-schedules-msg").textContent = "No schedules yet — register this database on the Service account setup tab.";
         // Not registered: there is no schedule to report, and in server mode this
         // page no longer runs one itself, so say exactly that.
         remoteSchedules = { known: false, list: [] };
@@ -1824,6 +1845,50 @@ geotab.addin.unassignDrivers = function () {
   }
 
   /* ---------------- scheduler ---------------- */
+  /**
+   * A scheduled run happens on AWS, so when its time passes the page waits for
+   * the service to finish it and write the record, then re-reads everything it
+   * shows: the header, the schedule table, the review and the audit trail.
+   */
+  function armDueRefresh() {
+    if (dueTimer) clearTimeout(dueTimer);
+    dueTimer = setTimeout(function () {
+      dueTimer = null;
+      refreshPage();
+    }, DUE_REFRESH_DELAY_MS);
+  }
+
+  /** The whole page, re-read rather than rebuilt: no reload, no lost scroll. */
+  function refreshPage() {
+    return reload()
+      .then(function () { return serverMode() ? refreshSchedules({ quiet: true }) : null; })
+      .then(function () { return onPreview(); });
+  }
+
+  /** One merged trail: the tenant's own log and the deployment's. */
+  function historyEntries() {
+    return core.mergeRunHistory((records.log && records.log.details.entries) || [], awsRuns);
+  }
+
+  /**
+   * The audit trail on demand: both sources are re-read — the tenant's own log,
+   * and in server mode what the deployment ran while no browser was open.
+   */
+  function onRefreshHistory() {
+    var btn = $("a1ud-history-refresh");
+    var msg = $("a1ud-historymsg");
+    btn.disabled = true;
+    msg.textContent = "Refreshing…";
+    return reload()
+      .then(function () {
+        var n = historyEntries().length;
+        msg.textContent = "Updated " + fmt(new Date()) + " — " + n + " run" + (n === 1 ? "" : "s") +
+          (awsRunsError ? " (the deployment's runs could not be read)" : "");
+      })
+      .catch(function (e) { msg.textContent = "Could not refresh: " + core.errText(e); })
+      .then(function () { btn.disabled = false; });
+  }
+
   function reload() {
     return core.loadRecords(api).then(function (r) {
       records = r;
@@ -1837,12 +1902,15 @@ geotab.addin.unassignDrivers = function () {
         .listRuns({})
         .then(function (data) {
           awsRuns = (data && data.runs) || [];
+          awsRunsError = null;
           renderHistory();
         })
-        .catch(function () {
+        .catch(function (e) {
           // Unlicensed, offline, or an older deployment without the action: the
-          // history still renders from what the tenant's own log has.
+          // history still renders from what the tenant's own log has, and says so
+          // when someone asks for it by hand.
           awsRuns = [];
+          awsRunsError = (e && e.code) || "unavailable";
           renderHistory();
         });
     });
@@ -1908,6 +1976,9 @@ geotab.addin.unassignDrivers = function () {
     stopped = true;
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+    // The refresh armed after a scheduled slot goes with them: a superseded copy
+    // of the add-in must not keep re-reading the service on its own.
+    if (dueTimer) { clearTimeout(dueTimer); dueTimer = null; }
     document.removeEventListener("visibilitychange", onVisibility);
     if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
   }
@@ -1959,6 +2030,16 @@ geotab.addin.unassignDrivers = function () {
   }
 
   /* ---------------- lifecycle ---------------- */
+  /**
+   * The review is what this page is for: what is assigned right now. MyGeotab
+   * gives the add-in a short viewport, and the status card plus Step 1 push the
+   * review three screens down, so the page opens on it.
+   */
+  function showReview() {
+    var review = $("a1ud-review");
+    if (review && review.scrollIntoView) review.scrollIntoView({ block: "start" });
+  }
+
   return {
     initialize: function (freshApi, state, callback) {
       api = freshApi;
@@ -1985,6 +2066,7 @@ geotab.addin.unassignDrivers = function () {
               renderGroups();
               onPreview();
               startServerMode();
+              showReview();
               startTimers();
               tick(true);
             });
@@ -2006,7 +2088,7 @@ geotab.addin.unassignDrivers = function () {
         // hidden; startServerMode() re-applies the licence decision and rebinds
         // the controls it lives on (a no-op outside service mode).
         if (me.isAdmin) {
-          fillForm(); renderGroups(); renderHistory(); renderStatus(); onPreview(); startServerMode();
+          fillForm(); renderGroups(); renderHistory(); renderStatus(); onPreview(); startServerMode(); showReview();
         }
       }
       if (me && me.isAdmin) { startTimers(); tick(true); syncWakeLock(); }
