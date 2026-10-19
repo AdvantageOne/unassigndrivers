@@ -7,8 +7,10 @@
  *   session(credentials)                          a forwarded add-in session (browser requests)
  *
  * The response envelope is JSON-RPC 2.0 (`{jsonrpc, id, result}` or
- * `{jsonrpc, id, error}`) — verified against a live capture. Errors become
- * AppError with a stable code so the add-in can show a useful message.
+ * `{jsonrpc, id, error}`) — verified against a live capture. A void method
+ * (`Set`, `Remove`) answers with a bare `{"jsonrpc":"2.0"}`: success, nothing
+ * to return. Errors become AppError with a stable code so the add-in can show
+ * a useful message.
  *
  * The shared core expects the callback-style `api` object the add-in has; use
  * toCoreApi() to adapt a session client for it.
@@ -92,6 +94,14 @@ function createGeotab(options) {
       throw rpcError(null, response.status, authCode);
     }
     if (body && body.result !== undefined) return body.result;
+    // An error, when present, is always the answer.
+    if (body && body.error) throw rpcError(body, response.status, authCode);
+    // MyGeotab answers a void method (`Set`, `Remove`) with a bare success
+    // envelope — `{"jsonrpc":"2.0"}` — carrying neither result nor error.
+    // Verified against a live capture: the write has been applied, so this is
+    // a success with nothing to return, not a failure. Anything that is not a
+    // JSON-RPC envelope at all (a proxy page, an empty object) still throws.
+    if (body && typeof body === "object" && !Array.isArray(body) && body.jsonrpc) return undefined;
     throw rpcError(body, response.status, authCode);
   }
 

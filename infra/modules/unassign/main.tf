@@ -187,6 +187,19 @@ data "aws_iam_policy_document" "lambda" {
     resources = ["${aws_s3_bucket.config.arn}/${local.run_log_prefix}*"]
   }
 
+  # Without this, GetObject on a run log that does not exist yet comes back as
+  # 403 AccessDenied rather than 404 NoSuchKey — S3 will not confirm a missing
+  # key to a caller that may not list the bucket — so "no runs recorded for this
+  # database", the normal first state, was reported as a failure. Nothing in the
+  # service lists objects; this grant exists only to make a missing key
+  # distinguishable, which is what the run log's tolerant read relies on.
+  statement {
+    sid       = "DistinguishMissingRunLog"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.config.arn]
+  }
+
   statement {
     sid       = "ReadCustomerSecrets"
     effect    = "Allow"
