@@ -208,6 +208,15 @@ run_selftest() {
   render_addin_html "$addin_fixture" "$addin_ca" > "$addin_once"
   st_eq "rendering is idempotent" "$(render_addin_html "$addin_fixture" "$addin_ca")" "$(render_addin_html "$addin_once" "$addin_ca")"
   st_true "the rendered page still ends with a newline" bash -c "tail -c1 '$addin_once' | od -c | grep -q '\\\\n'"
+  # The real page is far bigger than a pipe buffer, which is where a check written as
+  # `printf … | grep -q` breaks: grep exits at the match, printf takes SIGPIPE, and
+  # pipefail reports a page that does have an endpoint as one that has not. The fixture
+  # has to be this big, or the case cannot fail.
+  local addin_big="$PLAN_DIR/selftest-addin-big.html"
+  { printf '%s\n' '  var SERVER_API_BASE = "https://old.lambda-url.ca-central-1.on.aws";'
+    head -c 200000 /dev/zero | tr '\0' 'x'; printf '\n'; } > "$addin_big"
+  st_eq "a page larger than a pipe buffer still renders" "$addin_ca" \
+        "$(render_addin_html "$addin_big" "$addin_ca" | grep -o 'https://aaa[^"]*' | head -1)"
   st_false "a page with no endpoint to stamp is refused" render_addin_html "$addin_fixture" ""
   local addin_noendpoint="$PLAN_DIR/selftest-addin-noendpoint.html"
   printf '%s\n' '<html><script>' '  var SOMETHING_ELSE = 1;' '</script></html>' > "$addin_noendpoint"
