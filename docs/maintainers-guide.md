@@ -44,6 +44,14 @@ pnpm test                 # fails loudly if the built file is stale
 
 Everything else in the HTML (markup, styles, the UI script) is hand-edited as before.
 
+Second rule, new with the change gate: nothing under `infra/`, `src/`, `build/`, `scripts/`,
+`test/`, `.github/`, `.omp/`, `.claude/`, `.githooks/`, `package.json`, `pnpm-lock.yaml`, or
+`config*.json` is committed without asking whether the author is on the dev team and recording the
+answer, and nothing is ever committed to `main`. Agents are told the same thing in `AGENTS.md`; the
+git hooks, the agent hooks, and `.github/workflows/guard.yml` enforce it. See
+[change-gate.md](change-gate.md); install the hooks once per clone with `pnpm run hooks:install`
+(`pnpm install` does it for you).
+
 ## 3. Repository map
 
 | Path | Kind | What it is |

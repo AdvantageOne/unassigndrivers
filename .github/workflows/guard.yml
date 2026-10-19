@@ -1,0 +1,45 @@
+name: Change gate
+
+# Server-side backstop for the rules in AGENTS.md. Local hooks can be bypassed with
+# --no-verify or by an agent that sets UNASSIGN_DEV_TEAM itself; this job and CODEOWNERS
+# cannot be. docs/change-gate.md explains the whole chain.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: change-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the gate diffs the head against the base commit
+
+      - name: Refuse gated changes and uncommittable paths
+        run: node scripts/guard/ci-check.mjs
+        env:
+          GUARD_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The project has no dependencies (the Lambda runtime supplies SDK v3), so there is
+      # nothing to install: no package manager step by design.
+      - name: Unit tests + built add-in matches src/
+        run: node --test test/*.test.js

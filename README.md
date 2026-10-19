@@ -20,6 +20,7 @@ written back to the tenant's own MyGeotab database as a run log.
 
 Docs: **[deployment guide](docs/aws-deployment-guide.md)** for operating it,
 **[maintainer's guide](docs/maintainers-guide.md)** for changing it,
+**[change gate](docs/change-gate.md)** for who may change what (and what the agent rules enforce),
 **[implementation brief](docs/aws-port-implementation-prompt.md)** for the design decisions,
 **[legacy analysis](docs/aws-lambda-eventbridge-port.md)** for how the GitHub Actions version worked.
 
@@ -94,7 +95,10 @@ pnpm-lock.yaml                  lockfile; `pnpm install` writes nothing else
 test/                           unit tests (pnpm test); no network, no AWS, no tenant required
 infra/                          OpenTofu: module plus one thin root per region
 scripts/                        deploy, onboard, offboard
-docs/                           deployment guide, maintainer's guide, design brief, legacy analysis
+docs/                           deployment guide, maintainer's guide, change gate, design brief, legacy analysis
+AGENTS.md                       the rules for agents and humans: what may change, and what refuses
+.githooks/, scripts/guard/      the change gate (git hooks + one shared policy); pnpm install installs them
+.omp/, .claude/                 per-agent rules, hooks, and skills, all pointing at AGENTS.md
 ```
 
 **Tooling.** Package manager is pnpm (pinned in `package.json`; `pnpm test`, `pnpm run build:addin`).
