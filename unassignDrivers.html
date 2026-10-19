@@ -13,7 +13,9 @@
 
   <div class="a1ud-wrap">
     <header class="a1ud-header">
-      <img class="a1ud-logo" src="https://advantageone.tech/images/logo.png" alt="Advantage One" onerror="this.style.display='none'">
+      <a class="a1ud-logo-link" href="https://advantageone.tech" target="_blank" rel="noopener" title="advantageone.tech">
+        <img class="a1ud-logo" src="https://advantageone.tech/images/logo.png" alt="Advantage One" onerror="this.style.display='none'">
+      </a>
       <span class="a1ud-badge"><span class="a1ud-dot"></span>MyGeotab Add-In</span>
     </header>
 
@@ -73,8 +75,6 @@
           </div>
         </div>
         <div class="a1ud-form">
-          <label class="a1ud-check a1ud-span2"><input type="checkbox" id="a1ud-enabled"> Schedule enabled</label>
-
           <label>Repeat
             <select id="a1ud-mode">
               <option value="daily">Every day</option>
@@ -126,8 +126,31 @@
         <div id="a1ud-updated" class="a1ud-muted a1ud-small"></div>
       </section>
 
+      <!-- Schedules managed by the AWS scheduling service (hidden unless SERVER_API_BASE is set) -->
+      <section class="a1ud-card a1ud-hidden" id="a1ud-schedules-card">
+        <div class="a1ud-card-head">
+          <span class="a1ud-icontile"><svg class="a1ud-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg></span>
+          <div>
+            <span class="a1ud-eyebrow">Runs without this page open</span>
+            <h2>Scheduled runs</h2>
+          </div>
+        </div>
+        <p class="a1ud-muted">These run on Advantage One's scheduler, so they fire even when nobody has MyGeotab open. Saving above creates or updates a schedule — pick <em>Repeat: One time</em> for a single run — and the table below shows everything currently scheduled for this database.</p>
+        <div class="a1ud-actions">
+          <button type="button" class="a1ud-btn a1ud-secondary" id="a1ud-schedules-refresh">Refresh</button>
+          <span id="a1ud-schedules-msg" class="a1ud-muted"></span>
+          <span id="a1ud-editmsg" class="a1ud-muted"></span>
+        </div>
+        <div class="a1ud-tablewrap">
+          <table class="a1ud-table" id="a1ud-schedules">
+            <thead><tr><th>When</th><th>Assets</th><th>Kind</th><th>Next run</th><th title="Skip assets that are driving at run time">Skip driving</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- Preview / manual -->
-      <section class="a1ud-card">
+      <section class="a1ud-card" id="a1ud-review">
         <div class="a1ud-card-head">
           <span class="a1ud-icontile"><svg class="a1ud-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg></span>
           <div>
@@ -167,6 +190,10 @@
             <h2>Run history</h2>
           </div>
         </div>
+        <div class="a1ud-actions">
+          <button type="button" class="a1ud-btn a1ud-secondary" id="a1ud-history-refresh">Refresh</button>
+          <span id="a1ud-historymsg" class="a1ud-muted"></span>
+        </div>
         <div class="a1ud-tablewrap">
           <table class="a1ud-table" id="a1ud-history">
             <thead><tr><th>When</th><th>Trigger</th><th>By</th><th>Unassigned</th><th>Skipped</th><th>Failed / still assigned</th><th></th></tr></thead>
@@ -177,6 +204,38 @@
       </div>
 
       <div id="a1ud-tab-service" class="a1ud-tabpanel a1ud-hidden" role="tabpanel">
+        <!-- The credentials form staff use to register this database. It lives
+             on this tab rather than mid-page on the Scheduler tab, and the
+             licence check both reveals it and selects the tab, so the people
+             who have to fill it in land on it. -->
+        <section class="a1ud-card a1ud-hidden" id="a1ud-setup-card">
+          <div class="a1ud-card-head">
+            <span class="a1ud-icontile"><svg class="a1ud-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg></span>
+            <div>
+              <span class="a1ud-eyebrow">One-time setup</span>
+              <h2>Connect this database's service account</h2>
+            </div>
+          </div>
+          <p class="a1ud-muted">A service account is the MyGeotab user our scheduler signs in as. Create it in MyGeotab with <em>Administrator</em> clearance and <em>Company Group</em> data access, then save its credentials here: they go straight to the deployment's secret store, and are never kept in this page or written to a log.</p>
+          <div class="a1ud-form">
+            <label>User name
+              <input type="email" id="a1ud-worker-user" autocomplete="username" placeholder="svc-unassign@example.com">
+            </label>
+            <label>Password
+              <input type="password" id="a1ud-worker-pass" autocomplete="new-password">
+            </label>
+            <label>Server
+              <input type="text" id="a1ud-worker-server" value="my.geotab.com">
+            </label>
+            <label class="a1ud-check a1ud-span2"><input type="checkbox" id="a1ud-worker-license" checked> License this database for scheduled unassign</label>
+          </div>
+          <div class="a1ud-actions">
+            <button type="button" class="a1ud-btn a1ud-primary" id="a1ud-worker-save">Save service account</button>
+            <span id="a1ud-worker-msg" class="a1ud-muted"></span>
+          </div>
+          <div id="a1ud-worker-state" class="a1ud-muted"></div>
+        </section>
+
         <section class="a1ud-card">
           <div class="a1ud-card-head">
             <span class="a1ud-icontile"><svg class="a1ud-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg></span>
@@ -220,12 +279,27 @@
       </div>
     </div>
 
+    <!-- Unlicensed database: covers the page for anyone the licence check turns
+         away (hidden by default; shown only when SERVER_API_BASE is set) -->
+    <div id="a1ud-license-modal" class="a1ud-hidden" style="position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; padding:24px; overflow:auto; background:rgba(6,20,35,0.84)">
+      <div class="a1ud-card a1ud-alert" style="max-width:560px; margin:0">
+        <svg class="a1ud-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+        <div>
+          <h2>This database isn't licensed yet</h2>
+          <p>Please contact your CSR to enable your license</p>
+          <p class="a1ud-muted a1ud-small">Questions? Advantage One can help at <a href="mailto:jordan@advtracking.net">jordan@advtracking.net</a> or <a href="tel:+15874095003">587-409-5003</a>.</p>
+        </div>
+      </div>
+    </div>
+
     <div id="a1ud-loading" class="a1ud-card a1ud-muted">Loading…</div>
 
     <footer class="a1ud-footer">
-      <div>
-        <strong>Fleet infrastructure, engineered around your operations.</strong>
-        <span>Geotab Elite Specialized Partner</span>
+      <div class="a1ud-footer-brand">
+        <a href="https://advantageone.tech" target="_blank" rel="noopener">
+          <strong>Fleet infrastructure, engineered around your operations.</strong>
+          <span>Geotab Elite Specialized Partner</span>
+        </a>
       </div>
       <div class="a1ud-footer-contact">
         Need help? <a href="mailto:jordan@advtracking.net">jordan@advtracking.net</a> · <a href="tel:+15874095003">587-409-5003</a>
@@ -238,10 +312,11 @@
 (function () {
   if (document.getElementById('a1ud-style')) return;
   var f = document.createElement('link'); f.rel = 'stylesheet'; f.href = "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&display=swap"; f.id = 'a1ud-fonts'; document.head.appendChild(f);
-  var s = document.createElement('style'); s.id = 'a1ud-style'; s.textContent = "/*\n * Advantage One brand theme (dark-first)\n * Tokens from the Advantage One Branding Vault: marketing_docs/brand/*\n * All rules are scoped under .a1ud so they don't leak into MyGeotab.\n */\n.a1ud {\n  /* brand */\n  --primary: #99cbff;\n  --primary-container: #4e96d5;\n  --on-primary-container: #002c4a;\n  --secondary: #ffb59f;\n  --secondary-container: #bf3701;\n  --on-secondary-container: #ffe2da;\n  /* surfaces */\n  --surface: #061423;\n  --surface-container-low: #0f1c2c;\n  --surface-container: #132030;\n  --surface-container-high: #1e2b3b;\n  --surface-container-highest: #283646;\n  /* text + lines */\n  --on-surface: #d6e4f9;\n  --on-surface-variant: #c0c7d1;\n  --outline: #8a919b;\n  --outline-variant: #414750;\n  /* semantic */\n  --error: #ffb4ab;\n  --error-container: #93000a;\n  --on-error-container: #ffdad6;\n  --success: #4ade80;\n  /* effects */\n  --brand-glow: 0 0 40px rgba(78, 150, 213, 0.08);\n  --brand-glow-strong: 0 0 60px rgba(78, 150, 213, 0.12);\n\n  --font-headline: \"Plus Jakarta Sans\", Inter, -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n  --font-body: Inter, -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n\n  position: relative;\n  overflow: hidden;\n  min-height: 100vh;\n  font-family: var(--font-body);\n  font-size: 15px;\n  line-height: 1.55;\n  color: var(--on-surface);\n  background: var(--surface);\n  color-scheme: dark;\n  box-sizing: border-box;\n}\n.a1ud *, .a1ud *::before, .a1ud *::after { box-sizing: border-box; }\n\n/* atmosphere: engineering grid + blurred brand glow */\n.a1ud-grid-backdrop {\n  position: absolute; inset: 0; pointer-events: none; opacity: .06;\n  background-image:\n    linear-gradient(rgba(153,203,255,0.3) 1px, transparent 1px),\n    linear-gradient(90deg, rgba(153,203,255,0.3) 1px, transparent 1px);\n  background-size: 48px 48px;\n  -webkit-mask-image: linear-gradient(to bottom, black 0%, transparent 520px);\n          mask-image: linear-gradient(to bottom, black 0%, transparent 520px);\n}\n.a1ud-glow {\n  position: absolute; top: -220px; right: -160px; width: 560px; height: 560px; border-radius: 50%;\n  background: radial-gradient(circle, rgba(78,150,213,0.22), transparent 65%);\n  filter: blur(40px); pointer-events: none;\n}\n.a1ud-wrap { position: relative; max-width: 1120px; margin: 0 auto; padding: 28px 32px 40px; }\n\n/* header + hero */\n.a1ud-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 36px; }\n.a1ud-logo { height: 40px; width: auto; display: block; }\n.a1ud-hero { margin-bottom: 28px; max-width: 760px; }\n.a1ud h1 {\n  font-family: var(--font-headline); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05;\n  font-size: clamp(32px, 4.5vw, 48px); margin: 0 0 14px; color: var(--on-surface);\n}\n.a1ud h2 { font-family: var(--font-headline); font-weight: 700; font-size: 20px; letter-spacing: -0.01em; margin: 0; color: var(--on-surface); }\n.a1ud-lead { font-size: 18px; font-weight: 300; color: var(--on-surface-variant); margin: 0; }\n.a1ud-lead strong { color: var(--primary); font-weight: 600; }\n\n/* eyebrow / labels / badges */\n.a1ud-eyebrow {\n  display: block; font-family: var(--font-body); font-size: 11px; font-weight: 700;\n  text-transform: uppercase; letter-spacing: 0.3em; color: var(--primary); margin-bottom: 8px;\n}\n.a1ud-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .2em; color: var(--on-surface-variant); margin-bottom: 8px; }\n.a1ud-badge {\n  display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 2px;\n  background: rgba(78,150,213,0.2); color: var(--primary);\n  font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; white-space: nowrap;\n}\n.a1ud-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); animation: a1ud-pulse 2s ease-in-out infinite; }\n@keyframes a1ud-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }\n\n/* cards */\n.a1ud-card {\n  background: var(--surface-container-high); border: 1px solid rgba(65,71,80,0.6);\n  border-radius: 16px; padding: 28px; margin-bottom: 20px;\n  box-shadow: 0 20px 25px -5px rgba(0,0,0,.25); transition: border-color .15s, box-shadow .15s;\n}\n.a1ud-card:hover { border-color: rgba(153,203,255,0.3); }\n.a1ud-card-highlight {\n  border-color: rgba(153,203,255,0.3); box-shadow: var(--brand-glow);\n  background: linear-gradient(135deg, rgba(153,203,255,0.10), var(--surface-container-high) 45%, rgba(255,181,159,0.06));\n}\n.a1ud-card-head { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }\n.a1ud-card-head .a1ud-eyebrow { margin-bottom: 4px; }\n.a1ud-icontile {\n  width: 52px; height: 52px; flex: 0 0 52px; border-radius: 12px; background: rgba(153,203,255,0.1);\n  display: flex; align-items: center; justify-content: center; color: var(--primary);\n}\n.a1ud-ico { width: 22px; height: 22px; flex: 0 0 auto; fill: currentColor; display: block; }\n.a1ud-icontile .a1ud-ico { width: 28px; height: 28px; }\n\n.a1ud-alert { display: flex; gap: 14px; align-items: flex-start; border-color: rgba(255,180,171,0.4); color: var(--error); }\n.a1ud-alert strong { color: var(--on-surface); display: block; margin-bottom: 2px; }\n.a1ud-hidden { display: none !important; }\n.a1ud-muted { color: var(--on-surface-variant); }\n.a1ud-small { font-size: 12px; }\n\n/* status */\n.a1ud-status-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }\n.a1ud-big { font-family: var(--font-headline); font-weight: 800; font-size: clamp(22px, 3vw, 30px); letter-spacing: -0.02em; color: var(--on-surface); }\n.a1ud-stat { font-family: var(--font-headline); font-weight: 800; font-size: 18px; letter-spacing: -0.01em; color: var(--primary); margin-top: 4px; font-variant-numeric: tabular-nums; }\n.a1ud-pill {\n  display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; padding: 6px 14px;\n  font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; white-space: nowrap;\n  background: rgba(65,71,80,0.4); color: var(--on-surface-variant); border: 1px solid rgba(65,71,80,0.8);\n}\n.a1ud-pill::before { content: \"\"; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }\n.a1ud-pill.is-armed { background: rgba(78,150,213,0.18); color: var(--primary); border-color: rgba(153,203,255,0.3); }\n.a1ud-pill.is-armed::before { animation: a1ud-pulse 2s ease-in-out infinite; }\n.a1ud-pill.is-running { background: rgba(191,55,1,0.2); color: var(--secondary); border-color: rgba(255,181,159,0.3); }\n.a1ud-pill.is-running::before { animation: a1ud-pulse .8s ease-in-out infinite; }\n.a1ud-pill.is-error { background: rgba(147,0,10,0.3); color: var(--error); border-color: rgba(255,180,171,0.3); }\n.a1ud-lastresult { margin-top: 14px; font-size: 13px; color: var(--on-surface-variant); }\n.a1ud-lastresult:empty { display: none; }\n.a1ud-lastresult.is-ok { color: var(--success); }\n.a1ud-lastresult.is-bad { color: var(--error); }\n\n.a1ud-warn {\n  display: flex; gap: 12px; align-items: flex-start;\n  background: rgba(191,55,1,0.12); border: 1px solid rgba(255,181,159,0.2); color: var(--on-secondary-container);\n  border-radius: 12px; padding: 14px 16px; margin: 20px 0 14px; font-size: 14px;\n}\n.a1ud-warn .a1ud-ico { color: var(--secondary); }\n.a1ud-warn strong { color: var(--secondary); }\n\n/* form */\n.a1ud-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 22px; }\n.a1ud-span2 { grid-column: 1 / -1; }\n.a1ud-form > label { display: flex; flex-direction: column; gap: 8px; font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--on-surface-variant); }\n.a1ud input[type=time], .a1ud input[type=date], .a1ud input[type=number], .a1ud input[type=search], .a1ud select {\n  font: 500 15px var(--font-body); letter-spacing: normal; text-transform: none;\n  padding: 11px 13px; width: 100%; color: var(--on-surface);\n  background: var(--surface-container-low); border: 1px solid rgba(65,71,80,0.9); border-radius: 12px;\n  transition: border-color .15s, box-shadow .15s;\n}\n.a1ud input:focus, .a1ud select:focus { outline: none; border-color: var(--primary-container); box-shadow: 0 0 0 3px rgba(78,150,213,0.25); }\n.a1ud select option { background: var(--surface-container); color: var(--on-surface); }\n.a1ud input[type=checkbox] { accent-color: var(--primary-container); width: 16px; height: 16px; margin: 0; }\n.a1ud-check { display: flex !important; flex-direction: row !important; align-items: center; gap: 10px; font-size: 14px !important; font-weight: 500 !important; letter-spacing: normal !important; text-transform: none !important; color: var(--on-surface) !important; cursor: pointer; }\n.a1ud-days { display: flex; flex-wrap: wrap; gap: 8px; }\n.a1ud-days label {\n  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; padding: 7px 14px; border-radius: 999px; cursor: pointer; user-select: none;\n  background: rgba(6,20,35,0.4); color: var(--on-surface-variant); border: 1px solid rgba(65,71,80,0.9); transition: all .15s;\n}\n.a1ud-days label:has(input:checked) { background: rgba(78,150,213,0.2); color: var(--primary); border-color: rgba(153,203,255,0.4); }\n.a1ud-groups { max-height: 220px; overflow: auto; background: var(--surface-container-low); border: 1px solid rgba(65,71,80,0.9); border-radius: 12px; padding: 8px 14px; margin-top: 8px; }\n.a1ud-groups label { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 14px; }\n\n/* buttons (ctaPrimary / ctaSecondary from the brand system) */\n.a1ud-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 22px 0 10px; }\n.a1ud-btn {\n  display: inline-flex; align-items: center; gap: 8px; font: 700 14px var(--font-body);\n  padding: 12px 22px; border-radius: 12px; border: 0; cursor: pointer; transition: all .15s;\n}\n.a1ud-btn:disabled { opacity: .45; cursor: not-allowed; }\n.a1ud-btn .a1ud-ico { width: 18px; height: 18px; transition: transform .15s; }\n.a1ud-btn:hover:not(:disabled) .a1ud-ico { transform: translateX(4px); }\n.a1ud-primary { background: linear-gradient(135deg, var(--primary-container), var(--primary)); color: var(--on-primary-container); box-shadow: 0 20px 25px -5px rgba(0,0,0,.3); }\n.a1ud-primary:hover:not(:disabled) { box-shadow: var(--brand-glow-strong), 0 10px 25px rgba(153,203,255,0.2); }\n.a1ud-secondary { background: transparent; color: var(--on-surface); outline: 1px solid rgba(65,71,80,0.9); }\n.a1ud-secondary:hover:not(:disabled) { background: var(--surface-container-highest); }\n.a1ud-danger { background: var(--error-container); color: var(--on-error-container); }\n.a1ud-danger:hover:not(:disabled) { background: #b3000d; }\n.a1ud-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 6px 6px 6px 14px; border-radius: 14px; background: rgba(147,0,10,0.18); border: 1px solid rgba(255,180,171,0.25); color: var(--on-error-container); font-weight: 600; }\n\n/* tables (comparisonTable pattern) */\n.a1ud-tablewrap { overflow-x: auto; margin-top: 10px; border-radius: 12px; }\n.a1ud-table { width: 100%; border-collapse: collapse; font-size: 14px; }\n.a1ud-table th { text-align: left; padding: 12px 14px; font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--on-surface-variant); border-bottom: 1px solid rgba(65,71,80,0.8); white-space: nowrap; }\n.a1ud-table td { text-align: left; padding: 12px 14px; vertical-align: top; border-bottom: 1px solid rgba(65,71,80,0.35); }\n.a1ud-table tbody tr:nth-child(even) td { background: rgba(6,20,35,0.25); }\n.a1ud-table tbody tr:hover td { background: rgba(153,203,255,0.05); }\n.a1ud-table details { font-size: 12px; color: var(--on-surface-variant); }\n.a1ud-table summary { cursor: pointer; color: var(--primary); font-weight: 600; }\n.a1ud-tag { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; background: rgba(6,20,35,0.4); color: var(--on-surface-variant); border: 1px solid rgba(65,71,80,0.6); }\n.a1ud-tag.is-yes { background: rgba(191,55,1,0.2); color: var(--secondary); border-color: rgba(255,181,159,0.25); }\n\n/* footer */\n.a1ud-footer {\n  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 24px; align-items: center;\n  margin-top: 32px; padding-top: 22px; border-top: 1px solid rgba(65,71,80,0.5); font-size: 13px; color: var(--on-surface-variant);\n}\n.a1ud-footer strong { display: block; color: var(--on-surface); font-family: var(--font-headline); font-weight: 700; }\n.a1ud-footer a { color: var(--primary); text-decoration: none; }\n.a1ud-footer a:hover { text-decoration: underline; }\n\n@media (max-width: 720px) {\n  .a1ud-wrap { padding: 20px 16px 32px; }\n  .a1ud-form { grid-template-columns: 1fr; }\n  .a1ud-card { padding: 20px; }\n  .a1ud-status-row { flex-direction: column; }\n}\n\n/* ---------- tabs (1.1.6) ---------- */\n.a1ud-tabs {\n  display: flex; gap: 4px; margin: 0 0 20px; padding: 4px;\n  background: var(--surface-container-low); border: 1px solid var(--outline-variant);\n  border-radius: 999px; width: fit-content; max-width: 100%; overflow-x: auto;\n}\n.a1ud-tab {\n  appearance: none; border: 0; background: transparent; color: var(--on-surface-variant);\n  font: 600 14px/1 var(--font-body); padding: 10px 18px; border-radius: 999px; cursor: pointer; white-space: nowrap;\n}\n.a1ud-tab:hover { color: var(--on-surface); background: var(--surface-container-high); }\n.a1ud-tab.is-active { background: var(--primary-container); color: #fff; }\n.a1ud-tab:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }\n.a1ud a, .a1ud .a1ud-tablink { color: var(--primary); }\n.a1ud code {\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em;\n  background: var(--surface-container-highest); color: var(--on-surface); padding: 1px 6px; border-radius: 4px;\n}\n.a1ud-steplist { counter-reset: a1step; list-style: none; margin: 18px 0; padding: 0; display: grid; gap: 12px; }\n.a1ud-steplist li {\n  counter-increment: a1step; position: relative; padding: 14px 16px 14px 56px;\n  background: var(--surface-container); border: 1px solid var(--outline-variant); border-radius: 12px;\n  color: var(--on-surface-variant); line-height: 1.55;\n}\n.a1ud-steplist li::before {\n  content: counter(a1step); position: absolute; left: 16px; top: 14px; width: 28px; height: 28px; border-radius: 50%;\n  display: grid; place-items: center; font: 700 14px/1 var(--font-headline);\n  background: var(--primary-container); color: #fff;\n}\n.a1ud-steplist li strong { display: block; color: var(--on-surface); margin-bottom: 2px; }\n"; document.head.appendChild(s);
+  var s = document.createElement('style'); s.id = 'a1ud-style'; s.textContent = "/*\n * Advantage One brand theme (dark-first)\n * Tokens from the Advantage One Branding Vault: marketing_docs/brand/*\n * All rules are scoped under .a1ud so they don't leak into MyGeotab.\n */\n.a1ud {\n  /* brand */\n  --primary: #99cbff;\n  --primary-container: #4e96d5;\n  --on-primary-container: #002c4a;\n  --secondary: #ffb59f;\n  --secondary-container: #bf3701;\n  --on-secondary-container: #ffe2da;\n  /* surfaces */\n  --surface: #061423;\n  --surface-container-low: #0f1c2c;\n  --surface-container: #132030;\n  --surface-container-high: #1e2b3b;\n  --surface-container-highest: #283646;\n  /* text + lines */\n  --on-surface: #d6e4f9;\n  --on-surface-variant: #c0c7d1;\n  --outline: #8a919b;\n  --outline-variant: #414750;\n  /* semantic */\n  --error: #ffb4ab;\n  --error-container: #93000a;\n  --on-error-container: #ffdad6;\n  --success: #4ade80;\n  /* effects */\n  --brand-glow: 0 0 40px rgba(78, 150, 213, 0.08);\n  --brand-glow-strong: 0 0 60px rgba(78, 150, 213, 0.12);\n\n  --font-headline: \"Plus Jakarta Sans\", Inter, -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n  --font-body: Inter, -apple-system, \"Segoe UI\", Roboto, Arial, sans-serif;\n\n  position: relative;\n  overflow: hidden;\n  min-height: 100vh;\n  font-family: var(--font-body);\n  font-size: 15px;\n  line-height: 1.55;\n  color: var(--on-surface);\n  background: var(--surface);\n  color-scheme: dark;\n  box-sizing: border-box;\n}\n.a1ud *, .a1ud *::before, .a1ud *::after { box-sizing: border-box; }\n\n/* atmosphere: engineering grid + blurred brand glow */\n.a1ud-grid-backdrop {\n  position: absolute; inset: 0; pointer-events: none; opacity: .06;\n  background-image:\n    linear-gradient(rgba(153,203,255,0.3) 1px, transparent 1px),\n    linear-gradient(90deg, rgba(153,203,255,0.3) 1px, transparent 1px);\n  background-size: 48px 48px;\n  -webkit-mask-image: linear-gradient(to bottom, black 0%, transparent 520px);\n          mask-image: linear-gradient(to bottom, black 0%, transparent 520px);\n}\n.a1ud-glow {\n  position: absolute; top: -220px; right: -160px; width: 560px; height: 560px; border-radius: 50%;\n  background: radial-gradient(circle, rgba(78,150,213,0.22), transparent 65%);\n  filter: blur(40px); pointer-events: none;\n}\n.a1ud-wrap { position: relative; max-width: 1120px; margin: 0 auto; padding: 28px 32px 40px; }\n\n/* header + hero */\n.a1ud-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 36px; }\n.a1ud-logo-link { display: block; overflow: hidden; width: 234px; height: 30px; transition: opacity .15s ease; }\n.a1ud-logo-link:hover { opacity: .8; }\n.a1ud-logo-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; }\n/* The asset is 800x239 and almost all of it is transparent: the mark occupies\n   x 88..711, y 80..159. Scaling it whole left the mark a third of the height, and\n   indented it by the transparent margin so it started 32px right of every line of\n   text. The link is the mark's own box (624x80, 30px tall), and the image is\n   placed inside it at the scale that lands the mark there: 300x89.6 (scale\n   0.375), offset by the mark's corner, 33px across and 30px down. */\n.a1ud-logo { display: block; width: 300px; height: 89.6px; max-width: none; margin: -30px 0 0 -33px; }\n.a1ud-hero { margin-bottom: 28px; max-width: 760px; }\n.a1ud h1 {\n  font-family: var(--font-headline); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05;\n  font-size: clamp(32px, 4.5vw, 48px); margin: 0 0 14px; color: var(--on-surface);\n}\n.a1ud h2 { font-family: var(--font-headline); font-weight: 700; font-size: 20px; letter-spacing: -0.01em; margin: 0; color: var(--on-surface); }\n.a1ud-lead { font-size: 18px; font-weight: 300; color: var(--on-surface-variant); margin: 0; }\n.a1ud-lead strong { color: var(--primary); font-weight: 600; }\n\n/* eyebrow / labels / badges */\n.a1ud-eyebrow {\n  display: block; font-family: var(--font-body); font-size: 11px; font-weight: 700;\n  text-transform: uppercase; letter-spacing: 0.3em; color: var(--primary); margin-bottom: 8px;\n}\n.a1ud-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .2em; color: var(--on-surface-variant); margin-bottom: 8px; }\n.a1ud-badge {\n  display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 2px;\n  background: rgba(78,150,213,0.2); color: var(--primary);\n  font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; white-space: nowrap;\n}\n.a1ud-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); animation: a1ud-pulse 2s ease-in-out infinite; }\n@keyframes a1ud-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }\n\n/* cards */\n.a1ud-card {\n  background: var(--surface-container-high); border: 1px solid rgba(65,71,80,0.6);\n  border-radius: 16px; padding: 28px; margin-bottom: 20px;\n  box-shadow: 0 20px 25px -5px rgba(0,0,0,.25); transition: border-color .15s, box-shadow .15s;\n}\n.a1ud-card:hover { border-color: rgba(153,203,255,0.3); }\n.a1ud-card-highlight {\n  border-color: rgba(153,203,255,0.3); box-shadow: var(--brand-glow);\n  background: linear-gradient(135deg, rgba(153,203,255,0.10), var(--surface-container-high) 45%, rgba(255,181,159,0.06));\n}\n.a1ud-card-head { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }\n.a1ud-card-head .a1ud-eyebrow { margin-bottom: 4px; }\n.a1ud-icontile {\n  width: 52px; height: 52px; flex: 0 0 52px; border-radius: 12px; background: rgba(153,203,255,0.1);\n  display: flex; align-items: center; justify-content: center; color: var(--primary);\n}\n.a1ud-ico { width: 22px; height: 22px; flex: 0 0 auto; fill: currentColor; display: block; }\n.a1ud-icontile .a1ud-ico { width: 28px; height: 28px; }\n\n.a1ud-alert { display: flex; gap: 14px; align-items: flex-start; border-color: rgba(255,180,171,0.4); color: var(--error); }\n.a1ud-alert strong { color: var(--on-surface); display: block; margin-bottom: 2px; }\n.a1ud-hidden { display: none !important; }\n.a1ud-muted { color: var(--on-surface-variant); }\n.a1ud-small { font-size: 12px; }\n\n/* status */\n.a1ud-status-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }\n.a1ud-big { font-family: var(--font-headline); font-weight: 800; font-size: clamp(22px, 3vw, 30px); letter-spacing: -0.02em; color: var(--on-surface); }\n.a1ud-stat { font-family: var(--font-headline); font-weight: 800; font-size: 18px; letter-spacing: -0.01em; color: var(--primary); margin-top: 4px; font-variant-numeric: tabular-nums; }\n.a1ud-pill {\n  display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; padding: 6px 14px;\n  font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; white-space: nowrap;\n  background: rgba(65,71,80,0.4); color: var(--on-surface-variant); border: 1px solid rgba(65,71,80,0.8);\n}\n.a1ud-pill::before { content: \"\"; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }\n.a1ud-pill.is-armed { background: rgba(78,150,213,0.18); color: var(--primary); border-color: rgba(153,203,255,0.3); }\n.a1ud-pill.is-armed::before { animation: a1ud-pulse 2s ease-in-out infinite; }\n.a1ud-pill.is-running { background: rgba(191,55,1,0.2); color: var(--secondary); border-color: rgba(255,181,159,0.3); }\n.a1ud-pill.is-running::before { animation: a1ud-pulse .8s ease-in-out infinite; }\n.a1ud-pill.is-error { background: rgba(147,0,10,0.3); color: var(--error); border-color: rgba(255,180,171,0.3); }\n.a1ud-lastresult { margin-top: 14px; font-size: 13px; color: var(--on-surface-variant); }\n.a1ud-lastresult:empty { display: none; }\n.a1ud-lastresult.is-ok { color: var(--success); }\n.a1ud-lastresult.is-bad { color: var(--error); }\n\n.a1ud-warn {\n  display: flex; gap: 12px; align-items: flex-start;\n  background: rgba(191,55,1,0.12); border: 1px solid rgba(255,181,159,0.2); color: var(--on-secondary-container);\n  border-radius: 12px; padding: 14px 16px; margin: 20px 0 14px; font-size: 14px;\n}\n.a1ud-warn .a1ud-ico { color: var(--secondary); }\n.a1ud-warn strong { color: var(--secondary); }\n\n/* form */\n.a1ud-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 22px; }\n.a1ud-span2 { grid-column: 1 / -1; }\n.a1ud-form > label { display: flex; flex-direction: column; gap: 8px; font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--on-surface-variant); }\n.a1ud input[type=time], .a1ud input[type=date], .a1ud input[type=number], .a1ud input[type=search], .a1ud input[type=email], .a1ud input[type=password], .a1ud input[type=text], .a1ud select {\n  font: 500 15px var(--font-body); letter-spacing: normal; text-transform: none;\n  padding: 11px 13px; width: 100%; color: var(--on-surface);\n  background: var(--surface-container-low); border: 1px solid rgba(65,71,80,0.9); border-radius: 12px;\n  transition: border-color .15s, box-shadow .15s;\n}\n.a1ud input:focus, .a1ud select:focus { outline: none; border-color: var(--primary-container); box-shadow: 0 0 0 3px rgba(78,150,213,0.25); }\n.a1ud select option { background: var(--surface-container); color: var(--on-surface); }\n.a1ud input[type=checkbox] { accent-color: var(--primary-container); width: 16px; height: 16px; margin: 0; }\n.a1ud-check { display: flex !important; flex-direction: row !important; align-items: center; gap: 10px; font-size: 14px !important; font-weight: 500 !important; letter-spacing: normal !important; text-transform: none !important; color: var(--on-surface) !important; cursor: pointer; }\n.a1ud-days { display: flex; flex-wrap: wrap; gap: 8px; }\n.a1ud-days label {\n  display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; padding: 7px 14px; border-radius: 999px; cursor: pointer; user-select: none;\n  background: rgba(6,20,35,0.4); color: var(--on-surface-variant); border: 1px solid rgba(65,71,80,0.9); transition: all .15s;\n}\n.a1ud-days label:has(input:checked) { background: rgba(78,150,213,0.2); color: var(--primary); border-color: rgba(153,203,255,0.4); }\n.a1ud-groups { max-height: 220px; overflow: auto; background: var(--surface-container-low); border: 1px solid rgba(65,71,80,0.9); border-radius: 12px; padding: 8px 14px; margin-top: 8px; }\n.a1ud-groups label { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 14px; }\n\n/* buttons (ctaPrimary / ctaSecondary from the brand system) */\n.a1ud-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 22px 0 10px; }\n.a1ud-btn {\n  display: inline-flex; align-items: center; gap: 8px; font: 700 14px var(--font-body);\n  padding: 12px 22px; border-radius: 12px; border: 0; cursor: pointer; transition: all .15s;\n}\n.a1ud-btn:disabled { opacity: .45; cursor: not-allowed; }\n.a1ud-btn .a1ud-ico { width: 18px; height: 18px; transition: transform .15s; }\n.a1ud-btn:hover:not(:disabled) .a1ud-ico { transform: translateX(4px); }\n.a1ud-primary { background: linear-gradient(135deg, var(--primary-container), var(--primary)); color: var(--on-primary-container); box-shadow: 0 20px 25px -5px rgba(0,0,0,.3); }\n.a1ud-primary:hover:not(:disabled) { box-shadow: var(--brand-glow-strong), 0 10px 25px rgba(153,203,255,0.2); }\n.a1ud-secondary { background: transparent; color: var(--on-surface); outline: 1px solid rgba(65,71,80,0.9); }\n.a1ud-secondary:hover:not(:disabled) { background: var(--surface-container-highest); }\n.a1ud-danger { background: var(--error-container); color: var(--on-error-container); }\n.a1ud-danger:hover:not(:disabled) { background: #b3000d; }\n.a1ud-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 6px 6px 6px 14px; border-radius: 14px; background: rgba(147,0,10,0.18); border: 1px solid rgba(255,180,171,0.25); color: var(--on-error-container); font-weight: 600; }\n\n/* tables (comparisonTable pattern) */\n.a1ud-tablewrap { overflow-x: auto; margin-top: 10px; border-radius: 12px; }\n.a1ud-table { width: 100%; border-collapse: collapse; font-size: 14px; }\n.a1ud-table th { text-align: left; padding: 12px 14px; font-size: 10px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--on-surface-variant); border-bottom: 1px solid rgba(65,71,80,0.8); white-space: nowrap; }\n.a1ud-table td { text-align: left; padding: 12px 14px; vertical-align: top; border-bottom: 1px solid rgba(65,71,80,0.35); }\n.a1ud-table tbody tr:nth-child(even) td { background: rgba(6,20,35,0.25); }\n.a1ud-table tbody tr:hover td { background: rgba(153,203,255,0.05); }\n.a1ud-table details { font-size: 12px; color: var(--on-surface-variant); }\n.a1ud-table summary { cursor: pointer; color: var(--primary); font-weight: 600; }\n.a1ud-tag { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 10px; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; background: rgba(6,20,35,0.4); color: var(--on-surface-variant); border: 1px solid rgba(65,71,80,0.6); }\n.a1ud-tag.is-yes { background: rgba(191,55,1,0.2); color: var(--secondary); border-color: rgba(255,181,159,0.25); }\n\n/* footer */\n.a1ud-footer {\n  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px 24px; align-items: center;\n  margin-top: 32px; padding-top: 22px; border-top: 1px solid rgba(65,71,80,0.5); font-size: 13px; color: var(--on-surface-variant);\n}\n.a1ud-footer strong { display: block; color: var(--on-surface); font-family: var(--font-headline); font-weight: 700; }\n.a1ud-footer a { color: var(--primary); text-decoration: none; }\n.a1ud-footer a:hover { text-decoration: underline; }\n/* The brand line is a link now; it keeps the colours it had as plain text and\n   shows itself on hover, like the contact links beside it. */\n.a1ud-footer-brand a, .a1ud-footer-brand a span { color: inherit; }\n\n@media (max-width: 720px) {\n  .a1ud-wrap { padding: 20px 16px 32px; }\n  .a1ud-form { grid-template-columns: 1fr; }\n  .a1ud-card { padding: 20px; }\n  .a1ud-status-row { flex-direction: column; }\n}\n\n/* ---------- tabs (1.1.6) ---------- */\n.a1ud-tabs {\n  display: flex; gap: 4px; margin: 0 0 20px; padding: 4px;\n  background: var(--surface-container-low); border: 1px solid var(--outline-variant);\n  border-radius: 999px; width: fit-content; max-width: 100%; overflow-x: auto;\n}\n.a1ud-tab {\n  appearance: none; border: 0; background: transparent; color: var(--on-surface-variant);\n  font: 600 14px/1 var(--font-body); padding: 10px 18px; border-radius: 999px; cursor: pointer; white-space: nowrap;\n}\n.a1ud-tab:hover { color: var(--on-surface); background: var(--surface-container-high); }\n.a1ud-tab.is-active { background: var(--primary-container); color: #fff; }\n.a1ud-tab:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }\n.a1ud a, .a1ud .a1ud-tablink { color: var(--primary); }\n.a1ud code {\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em;\n  background: var(--surface-container-highest); color: var(--on-surface); padding: 1px 6px; border-radius: 4px;\n}\n.a1ud-steplist { counter-reset: a1step; list-style: none; margin: 18px 0; padding: 0; display: grid; gap: 12px; }\n.a1ud-steplist li {\n  counter-increment: a1step; position: relative; padding: 14px 16px 14px 56px;\n  background: var(--surface-container); border: 1px solid var(--outline-variant); border-radius: 12px;\n  color: var(--on-surface-variant); line-height: 1.55;\n}\n.a1ud-steplist li::before {\n  content: counter(a1step); position: absolute; left: 16px; top: 14px; width: 28px; height: 28px; border-radius: 50%;\n  display: grid; place-items: center; font: 700 14px/1 var(--font-headline);\n  background: var(--primary-container); color: #fff;\n}\n.a1ud-steplist li strong { display: block; color: var(--on-surface); margin-bottom: 2px; }\n"; document.head.appendChild(s);
 })();
 </script>
 <script>
+/* BUILD:core:begin */
 /*
  * Scheduled Driver Unassign - core logic
  * AdvantageOne | MyGeotab Add-In
@@ -723,6 +798,59 @@
       });
   }
 
+  /**
+   * The Run history, from both sources.
+   *
+   * `entries` are the tenant's own log — a run's detail, written by whoever ran
+   * it (this browser, or the service). `runs` are the deployment's records from
+   * AWS, which also cover attempts that never reached Geotab (a licence refusal,
+   * a database the deployment does not know, a MyGeotab outage) and confirm that
+   * a scheduled slot fired while no browser was open.
+   *
+   * The two overlap on any run the service performed, so they are merged on
+   * occurrence+trigger with the tenant's entry winning: it carries the rows.
+   * Rows that exist only in AWS carry counts and a note instead.
+   */
+  function mergeRunHistory(entries, runs) {
+    var seen = {};
+    var keyOf = function (r) { return (r.occurrence || r.at) + "|" + (r.trigger || "manual"); };
+    var out = [];
+    (entries || []).forEach(function (e) {
+      seen[keyOf(e)] = true;
+      out.push(e);
+    });
+    (runs || []).forEach(function (r) {
+      var key = keyOf(r);
+      if (seen[key]) return;
+      seen[key] = true;
+      var note = r.outcome || "ran";
+      if (r.reason) note += ": " + r.reason;
+      else if (r.code && r.code !== "OK") note += ": " + r.code;
+      out.push({
+        at: r.at,
+        trigger: r.trigger,
+        by: r.by,
+        occurrence: r.occurrence || null,
+        source: "aws",
+        outcome: r.outcome || null,
+        code: r.code || null,
+        unassigned: [],
+        skipped: [],
+        failed: [],
+        stillAssigned: [],
+        counts: {
+          unassigned: r.unassigned || 0,
+          skipped: r.skipped || 0,
+          failed: r.failed || 0,
+          stillAssigned: r.stillAssigned || 0
+        },
+        note: note
+      });
+    });
+    out.sort(function (a, b) { return Date.parse(b.at) - Date.parse(a.at); });
+    return out.slice(0, MAX_LOG_ENTRIES);
+  }
+
   var api = {
     ADDIN_ID: ADDIN_ID,
     UNKNOWN_DRIVER_ID: UNKNOWN_DRIVER_ID,
@@ -734,6 +862,7 @@
     loadRecords: loadRecords,
     saveSchedule: saveSchedule,
     appendLog: appendLog,
+    mergeRunHistory: mergeRunHistory,
     claimOccurrence: claimOccurrence,
     checkAdmin: checkAdmin,
     getAssignments: getAssignments,
@@ -747,6 +876,7 @@
   else root.A1UnassignCore = api;
 })(typeof window !== "undefined" ? window : this);
 
+/* BUILD:core:end */
 </script>
 <script>
 /*
@@ -756,6 +886,172 @@
  * The function name (unassignDrivers) must match the HTML file name.
  */
 /* global geotab, A1UnassignCore */
+/* BUILD:client:begin */
+/*
+ * Scheduled Driver Unassign - add-in API client
+ * AdvantageOne
+ *
+ * Talks to the AWS deployment (Lambda Function URL) described in
+ * docs/aws-port-implementation-prompt.md sections 5.1 - 5.3.
+ *
+ * Inlined into unassignDrivers.html between the BUILD:client markers by
+ * build/inline-core.mjs, so edit this file and rebuild rather than editing the
+ * add-in. The same object is require()-able in Node for tests.
+ *
+ * The session is a bearer-equivalent credential: it is sent on every request
+ * and never stored, logged, or cached.
+ */
+(function (root) {
+  "use strict";
+
+  var DEFAULT_TIMEOUT_MS = 20000;
+
+  var ERROR_TEXT = {
+    BAD_REQUEST: "The request was rejected. Check the form and try again.",
+    SESSION_INVALID: "Your MyGeotab session is no longer valid. Refresh the page and sign in again.",
+    DATABASE_NOT_ONBOARDED: "This database is not set up for automatic runs yet. Contact Advantage One.",
+    ADDIN_ACCESS_DENIED: "Your MyGeotab role does not grant access to this add-in.",
+    CLEARANCE_REQUIRED: "Your MyGeotab role is missing a clearance this action needs.",
+    LICENSE_REQUIRED: "Please contact your CSR to enable your license",
+    NOT_FOUND: "That schedule no longer exists. Refresh the list.",
+    DUPLICATE: "A schedule already exists for that group at that time.",
+    GEOTAB_ERROR: "MyGeotab rejected the request.",
+    INTERNAL: "The scheduling service hit an error. Try again in a moment."
+  };
+
+  function ApiError(code, message, status, requestId) {
+    var error = new Error(message || ERROR_TEXT[code] || "The request failed.");
+    error.name = "ApiError";
+    error.code = code || "INTERNAL";
+    error.status = status || 0;
+    error.requestId = requestId || null;
+    return error;
+  }
+
+  // Codes whose message is written for whoever is filling the form: the service
+  // names the reason ("MyGeotab rejected those credentials for advone_matt_dev1:
+  // InvalidUserException: Incorrect login credentials"), and that beats generic
+  // copy. Everything else keeps the canned sentence — an INTERNAL detail is not
+  // something to put in front of an operator.
+  var PREFER_SERVER_MESSAGE = { BAD_REQUEST: true };
+
+  /** Message to show a person for a thrown error. */
+  function textFor(error) {
+    if (!error) return ERROR_TEXT.INTERNAL;
+    if (error.code && PREFER_SERVER_MESSAGE[error.code] && error.message) return error.message;
+    if (error.code && ERROR_TEXT[error.code]) return ERROR_TEXT[error.code];
+    return error.message || ERROR_TEXT.INTERNAL;
+  }
+
+  function normaliseBaseUrl(baseUrl) {
+    var value = String(baseUrl || "").trim();
+    if (!value) return "";
+    return value.replace(/\/+$/, "");
+  }
+
+  function createClient(options) {
+    options = options || {};
+    var baseUrl = normaliseBaseUrl(options.baseUrl);
+    var timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
+    var fetchImpl = options.fetchImpl || (root && root.fetch ? root.fetch.bind(root) : null);
+    var sessionProvider = options.session || options.getSession || null;
+
+    if (!baseUrl) throw new Error("A1UnassignApi: baseUrl is required");
+    if (!fetchImpl) throw new Error("A1UnassignApi: fetch is not available");
+
+    /** Accepts an object, a promise, or the MyGeotab callback style getSession(cb). */
+    function session() {
+      return new Promise(function (resolve, reject) {
+        var provided;
+        try {
+          provided = typeof sessionProvider === "function" ? sessionProvider() : sessionProvider;
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        if (provided && typeof provided.then === "function") {
+          provided.then(resolve, reject);
+          return;
+        }
+        if (provided) {
+          resolve(provided);
+          return;
+        }
+        reject(ApiError("SESSION_INVALID", "No MyGeotab session is available."));
+      });
+    }
+
+    function withTimeout() {
+      if (typeof AbortController === "undefined") return { signal: undefined, cancel: function () {} };
+      var controller = new AbortController();
+      var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+      return { signal: controller.signal, cancel: function () { clearTimeout(timer); } };
+    }
+
+    function parseBody(response) {
+      return response.text().then(function (text) {
+        if (!text) return {};
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          throw ApiError("INTERNAL", "The scheduling service returned an unreadable response.", response.status);
+        }
+      });
+    }
+
+    function request(action, payload) {
+      return session().then(function (current) {
+        var timeout = withTimeout();
+        return fetchImpl(baseUrl + "/", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: action, session: current, payload: payload || {} }),
+          signal: timeout.signal
+        }).then(function (response) {
+          timeout.cancel();
+          return parseBody(response).then(function (body) {
+            if (body && body.ok === false && body.error) {
+              throw ApiError(body.error.code, body.error.message, response.status, body.requestId);
+            }
+            if (!response.ok) {
+              throw ApiError("INTERNAL", "The scheduling service returned HTTP " + response.status + ".", response.status);
+            }
+            return (body && body.data) || {};
+          });
+        }, function (error) {
+          timeout.cancel();
+          if (error && error.name === "AbortError") {
+            throw ApiError("INTERNAL", "The scheduling service did not respond in time.");
+          }
+          throw ApiError("INTERNAL", "Could not reach the scheduling service: " + (error && error.message ? error.message : error));
+        });
+      });
+    }
+
+    return {
+      baseUrl: baseUrl,
+      request: request,
+      listSchedules: function () { return request("listSchedules", {}); },
+      createSchedule: function (payload) { return request("createSchedule", payload); },
+      updateSchedule: function (payload) { return request("updateSchedule", payload); },
+      addRun: function (payload) { return request("addRun", payload); },
+      deleteSchedule: function (payload) { return request("deleteSchedule", payload); },
+      unassign: function (payload) { return request("unassign", payload || {}); },
+      listAssignments: function (payload) { return request("listAssignments", payload || {}); },
+      license: function () { return request("license", {}); },
+      saveWorkerCredentials: function (payload) { return request("saveWorkerCredentials", payload); },
+      // What the deployment itself has run for this database: confirmation that a
+      // scheduled slot fired, including attempts that never reached Geotab.
+      listRuns: function (payload) { return request("listRuns", payload); },
+      health: function () { return request("health", {}); }
+    };
+  }
+
+  var api = { create: createClient, ApiError: ApiError, textFor: textFor, ERROR_TEXT: ERROR_TEXT };
+  root.A1UnassignApi = api;
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+})(typeof window !== "undefined" ? window : this);
+/* BUILD:client:end */
 geotab.addin.unassignDrivers = function () {
   "use strict";
 
@@ -765,9 +1061,35 @@ geotab.addin.unassignDrivers = function () {
   var DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var EXTRA_ALLOWED_SECURITY_GROUP_IDS = []; // add custom clearance IDs here if needed
 
+  // The deployment's Lambda Function URL (the Canada deployment). Empty string
+  // keeps the original in-browser scheduler, which only runs while this page is
+  // open; see docs/aws-deployment-guide.md. Multi-region routing is not decided
+  // yet, so this is one endpoint for now.
+  var SERVER_API_BASE = "https://yfzpzulqadv5r7rkbtbenmphiy0xrdnl.lambda-url.ca-central-1.on.aws";
+  var client = null;          // A1UnassignApi client, created on first use
+  var serverBoundRoot = null; // the page element the service controls are bound to
+  var editingName = null;     // name of the schedule the form is editing
+
   var api, me = null;
   var tabId = "tab-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   var records = { schedule: null, log: null };
+  // The deployment's own record of what it ran (the service's listRuns action):
+  // a scheduled slot fires with no browser open, and an attempt that never
+  // reached Geotab exists nowhere else.
+  var awsRuns = [];
+  // What the deployment holds for this database, found by its Geotab database
+  // name (the service's listSchedules action). In server mode that is the
+  // schedule that actually fires, so it is what the header panel shows. `known`
+  // stays false until an answer arrives: the panel must never invent a time.
+  var remoteSchedules = { known: false, list: [] };
+  var schedulesFetchedAt = 0;
+  // The countdown running out means the slot fired on AWS, and a run needs a few
+  // seconds to finish and be written down before there is anything new to read.
+  var DUE_REFRESH_DELAY_MS = 10000;
+  var countingTo = null;   // the instant the header is counting down to
+  var refreshedFor = null; // ...and the last one the page refreshed for
+  var dueTimer = null;
+  var awsRunsError = null; // why the deployment's runs are absent, if they are
   var groups = [];
   var tickTimer = null, clockTimer = null, tickCount = 0;
   var running = false, wakeLock = null, lastRows = [];
@@ -822,6 +1144,7 @@ geotab.addin.unassignDrivers = function () {
     $("a1ud-groupfilter").addEventListener("input", renderGroups);
     $("a1ud-save").addEventListener("click", onSave);
     $("a1ud-preview").addEventListener("click", onPreview);
+    $("a1ud-history-refresh").addEventListener("click", onRefreshHistory);
     $("a1ud-runnow").addEventListener("click", onRunNowAsk);
     $("a1ud-confirmyes").addEventListener("click", onRunNowConfirm);
     $("a1ud-confirmno").addEventListener("click", function () { show($("a1ud-confirmwrap"), false); $("a1ud-runnow").disabled = false; });
@@ -863,7 +1186,6 @@ geotab.addin.unassignDrivers = function () {
     }
     tzSel.value = tz;
     if (!s) { syncModeVisibility(); return; }
-    $("a1ud-enabled").checked = !!s.enabled;
     $("a1ud-mode").value = s.mode || "daily";
     $("a1ud-time").value = s.time || "23:00";
     $("a1ud-oncedate").value = s.onceDate || "";
@@ -884,7 +1206,10 @@ geotab.addin.unassignDrivers = function () {
   function readForm() {
     var mode = $("a1ud-mode").value;
     var s = {
-      enabled: $("a1ud-enabled").checked,
+      // Saving is what puts a schedule in place, and the list below is where one
+      // is taken out again: there is no separate "enabled" flag to set, so a
+      // saved schedule is always on.
+      enabled: true,
       mode: mode,
       time: $("a1ud-time").value,
       timeZone: $("a1ud-tz").value,
@@ -898,32 +1223,125 @@ geotab.addin.unassignDrivers = function () {
     if (mode === "weekly" && !s.days.length) throw new Error("Pick at least one day.");
     if (mode === "once" && !s.onceDate) throw new Error("Pick a date.");
     if ($("a1ud-scope").value === "groups" && !s.scope.groupIds.length) throw new Error("Pick at least one group, or choose All assets.");
-    if (s.enabled && !core.nextOccurrence(s, new Date())) throw new Error("That date and time is already in the past.");
+    if (!core.nextOccurrence(s, new Date())) throw new Error("That date and time is already in the past.");
     return s;
   }
 
   /* ---------------- status ---------------- */
-  function renderStatus() {
-    var s = sched();
-    var next = s && s.enabled ? core.nextOccurrence(s, new Date(Math.max(Date.now(), s.lastOccurrence ? Date.parse(s.lastOccurrence) : 0))) : null;
-    if (!next) {
-      $("a1ud-next").textContent = s && s.enabled ? "No upcoming run" : "Not scheduled";
-      $("a1ud-countdown").textContent = "";
-      if (!running) setState("Idle");
-      return;
-    }
-    $("a1ud-next").textContent = fmt(next, s.timeZone);
-    var ms = next - Date.now();
+  /** "in 3d 4h 12m 5s" — seconds only on the last day, as the header always read. */
+  function countdownText(ms) {
     var h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000), sec = Math.floor((ms % 60000) / 1000);
     var d = Math.floor(h / 24);
-    $("a1ud-countdown").textContent = "in " + (d ? d + "d " + (h % 24) + "h " : h ? h + "h " : "") + m + "m " + (d ? "" : sec + "s");
-    if (!running) setState("Armed", "is-armed");
+    return "in " + (d ? d + "d " + (h % 24) + "h " : h ? h + "h " : "") + m + "m " + (d ? "" : sec + "s");
+  }
+
+  function showNext(text, detail, state) {
+    $("a1ud-next").textContent = text;
+    $("a1ud-countdown").textContent = detail;
+    if (!running) setState(state, state === "Armed" ? "is-armed" : "");
+  }
+
+  /**
+   * When one of the deployment's schedules runs next. A recurring plan carries
+   * enough to recompute it here, which keeps the countdown honest between
+   * refreshes and after a slot fires; a one-time run has only the instant the
+   * service computed for it.
+   */
+  function remoteNextRun(schedule) {
+    if (schedule.kind !== "one-time" && schedule.mode && schedule.time) {
+      var next = core.nextOccurrence({
+        enabled: true, mode: schedule.mode, time: schedule.time,
+        timeZone: schedule.timeZone || undefined, days: schedule.days || [], onceDate: null
+      }, new Date());
+      if (next) return next.getTime();
+    }
+    var at = schedule.nextRun ? Date.parse(schedule.nextRun) : NaN;
+    return !isNaN(at) && at > Date.now() ? at : null;
+  }
+
+  /** Which of this database's schedules runs next, if any. */
+  function nextRemoteRun() {
+    var best = null;
+    (remoteSchedules.list || []).forEach(function (schedule) {
+      // AWS's own state: a disabled schedule will not fire, so it is not "next".
+      if (schedule.state && schedule.state !== "ENABLED") return;
+      var at = remoteNextRun(schedule);
+      if (!at) return;
+      if (!best || at < best.at) best = { at: at, schedule: schedule };
+    });
+    return best;
+  }
+
+  /** "every day at 23:00" / "every Mon, Wed at 06:30" / "a one-time run". */
+  function scheduleWhen(schedule) {
+    if (schedule.kind === "one-time") return "a one-time run";
+    var at = schedule.time ? " at " + schedule.time : "";
+    if (schedule.mode === "weekly") {
+      var days = (schedule.days || []).map(function (d) { return DAY_NAMES[d]; }).join(", ");
+      return "every " + (days || "—") + at;
+    }
+    return "every day" + at;
+  }
+
+  /**
+   * The header panel in server mode: the schedule Advantage One's scheduler holds
+   * for this database, and when it runs next. That schedule fires whether or not
+   * anyone has MyGeotab open, so it — not the copy saved in this browser — is
+   * what the user is owed.
+   */
+  function renderServerStatus() {
+    // The countdown running out means the schedule fired on AWS. Re-read once the
+    // run has had time to finish and be recorded — asking immediately would only
+    // show the run that has not happened yet.
+    if (countingTo !== null && Date.now() >= countingTo && refreshedFor !== countingTo) {
+      refreshedFor = countingTo;
+      countingTo = null;
+      armDueRefresh();
+    }
+    if (!remoteSchedules.known) {
+      // Not asked yet, or the ask was refused: claim nothing.
+      return showNext("Managed on AWS", "Runs on our scheduler, with or without this page open.", "Idle");
+    }
+    var upcoming = nextRemoteRun();
+    if (!upcoming) {
+      var list = remoteSchedules.list || [];
+      var enabled = list.filter(function (s) { return !s.state || s.state === "ENABLED"; });
+      return showNext(
+        list.length ? "No upcoming run" : "Not scheduled",
+        !list.length ? "Nothing is scheduled for this database yet."
+          : !enabled.length ? "This database's schedule is turned off."
+            : "Nothing is due from the schedules this database has.",
+        "Idle"
+      );
+    }
+    var s = upcoming.schedule;
+    countingTo = upcoming.at;
+    showNext(fmt(new Date(upcoming.at), s.timeZone), countdownText(upcoming.at - Date.now()) + " — " + scheduleWhen(s), "Armed");
+  }
+
+  function renderStatus() {
+    // Server mode: AWS owns the schedule, so the deployment's answer is the
+    // answer (see renderServerStatus). The local record is the legacy path's.
+    if (serverMode()) return renderServerStatus();
+    var s = sched();
+    var next = s && s.enabled ? core.nextOccurrence(s, new Date(Math.max(Date.now(), s.lastOccurrence ? Date.parse(s.lastOccurrence) : 0))) : null;
+    if (!next) return showNext(s && s.enabled ? "No upcoming run" : "Not scheduled", "", "Idle");
+    showNext(fmt(next, s.timeZone), countdownText(next - Date.now()), "Armed");
   }
 
   function renderHistory() {
-    var entries = (records.log && records.log.details.entries) || [];
+    // Both sources: the tenant's own log (a run's detail) and the deployment's
+    // run log (scheduled runs, and attempts that never reached Geotab). One run
+    // the service performed is in both, so they are merged rather than listed
+    // twice.
+    var entries = historyEntries();
     var tb = $("a1ud-history").querySelector("tbody");
     if (!entries.length) { tb.innerHTML = '<tr><td colspan="7" class="a1ud-muted">No runs yet</td></tr>'; return; }
+    // A row that exists only in the deployment's log has counts, not the rows.
+    var count = function (e, key) {
+      if (e.counts && typeof e.counts[key] === "number") return e.counts[key];
+      return (e[key] || []).length;
+    };
     tb.innerHTML = entries.map(function (e) {
       var detail = function (arr) {
         return (arr || []).map(function (r) {
@@ -939,7 +1357,7 @@ geotab.addin.unassignDrivers = function () {
           (e.stillAssigned && e.stillAssigned.length ? "<strong>Still assigned after run</strong><br>" + detail(e.stillAssigned) : "") + "</details>"
         : (e.note ? esc(e.note) : "");
       return "<tr><td>" + esc(fmt(new Date(e.at))) + "</td><td>" + trig + "</td><td>" + esc(byLabel(e.by)) + "</td><td>" +
-        (e.unassigned || []).length + "</td><td>" + (e.skipped || []).length + "</td><td>" + ((e.failed || []).length + (e.stillAssigned || []).length) +
+        count(e, "unassigned") + "</td><td>" + count(e, "skipped") + "</td><td>" + (count(e, "failed") + count(e, "stillAssigned")) +
         "</td><td>" + body + "</td></tr>";
     }).join("");
   }
@@ -955,6 +1373,425 @@ geotab.addin.unassignDrivers = function () {
     }).join("") : '<tr><td colspan="5" class="a1ud-muted">No drivers are assigned in this scope. Your fleet is clean.</td></tr>';
   }
 
+  /* ---------------- AWS scheduling service (server mode) ----------------
+   * With SERVER_API_BASE set, schedules live in EventBridge and are executed by
+   * the Lambda, so they fire whether or not this page is open. The form writes
+   * to the service, "Scheduled runs" lists what exists for this database, and
+   * the in-tab scheduler stays off. Preview and Run history still read Geotab
+   * directly, which is also where every run is logged.
+   */
+  function serverMode() { return !!SERVER_API_BASE; }
+
+  function serverClient() {
+    if (!client) {
+      client = A1UnassignApi.create({
+        baseUrl: SERVER_API_BASE,
+        getSession: function () {
+          return new Promise(function (resolve, reject) {
+            api.getSession(function (session) {
+              if (session && session.userName) resolve(session);
+              else reject(new Error("MyGeotab did not return a session."));
+            });
+          });
+        }
+      });
+    }
+    return client;
+  }
+
+  function serverMessage(error) {
+    // A refusal hides the page it belongs to, whichever action surfaced it, so
+    // the server's enforcement and what the user sees always agree.
+    if (licenseRefused(error)) showLicenseModal();
+    return A1UnassignApi.textFor(error);
+  }
+
+  /* ---------------- licensing (service mode) ----------------
+   * The deployment refuses most actions while a database is unlicensed, so the
+   * page asks first: Advantage One staff can finish the setup here, everyone
+   * else is told to contact their CSR (the overlay covers the page).
+   */
+  /**
+   * Only a licence refusal earns the overlay. DATABASE_NOT_ONBOARDED means the
+   * database has no service account yet — the state the setup panel exists to
+   * fix for staff — so treating it as a licence problem used to hide that very
+   * panel behind "contact your CSR".
+   */
+  function licenseRefused(error) {
+    return !!error && error.code === "LICENSE_REQUIRED";
+  }
+
+  function showLicenseModal() {
+    show($("a1ud-app"), false);
+    show($("a1ud-license-modal"), true);
+  }
+
+  function hideLicenseModal() { show($("a1ud-license-modal"), false); }
+
+  /** Asks the service whether this database is licensed. Never rejects. */
+  function checkLicense() {
+    if (!serverMode()) return Promise.resolve(null);
+    return serverClient()
+      .license()
+      .catch(function (e) {
+        // A refusal belongs to the modal; anything else must leave the page
+        // usable, with the reason in the console for whoever is debugging it.
+        if (licenseRefused(e)) showLicenseModal();
+        else if (window.console) console.warn("[unassignDrivers] license check failed", e);
+        return null;
+      });
+  }
+
+  function renderWorkerState(data) {
+    var el = $("a1ud-worker-state");
+    if (!el) return;
+    el.textContent = data && data.workerConfigured
+      ? "A service account is already configured for this database."
+      : "No service account is configured yet.";
+  }
+
+  /**
+   * What a licence response means for this page. Returns the decision so the
+   * caller can decide whether asking the service for schedules makes sense:
+   * "setup" (staff, nothing registered yet), "ready", "unlicensed", or null when
+   * there is nothing to act on (legacy mode, or the check could not be made).
+   */
+  function applyLicense(data) {
+    if (!data) return null;
+    if (data.staff && data.setupAllowed) {
+      // Staff may connect the service account; the app itself stays usable.
+      // The response carries no server field, so the form keeps its default.
+      hideLicenseModal();
+      show($("a1ud-setup-card"), true);
+      renderWorkerState(data);
+      if (!data.onboarded) {
+        // Nothing is registered yet. The page still opens on the review — that is
+        // what it is for — and the fix is one tab away, named in the message the
+        // scheduler card shows.
+        return "setup";
+      }
+      return "ready";
+    }
+    if (data.licensed) {
+      hideLicenseModal();
+      show($("a1ud-setup-card"), false);
+      renderWorkerState(data);
+      return "ready";
+    }
+    show($("a1ud-setup-card"), false);
+    renderWorkerState(data);
+    showLicenseModal();
+    return "unlicensed";
+  }
+
+  function onSaveWorker() {
+    var msg = $("a1ud-worker-msg");
+    var button = $("a1ud-worker-save");
+    var user = $("a1ud-worker-user").value.trim();
+    var pass = $("a1ud-worker-pass").value;
+    if (!user || !pass) {
+      msg.textContent = "Enter the service account's user name and password.";
+      return Promise.resolve();
+    }
+    // The password lives in this request and nowhere else: not in a log, not in
+    // storage, not in another attribute — and the field is cleared as soon as
+    // the service answers.
+    var licensed = $("a1ud-worker-license").checked;
+    button.disabled = true;
+    msg.textContent = "Saving…";
+    return serverClient()
+      .saveWorkerCredentials({
+        workerUserName: user,
+        workerPassword: pass,
+        server: $("a1ud-worker-server").value.trim() || "my.geotab.com",
+        timeZone: (me && me.timeZoneId) || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        licensed: licensed,
+        notes: ""
+      })
+      .then(function (data) {
+        $("a1ud-worker-pass").value = "";
+        msg.textContent = licensed && (!data || data.licensed !== false)
+          ? "Saved. This database is now licensed."
+          : "Saved.";
+        // Ask again so the state line and the overlay follow the new truth —
+        // and, once the database is registered, hand the user their schedules
+        // instead of leaving them on the setup tab.
+        return checkLicense().then(function (data) {
+          var state = applyLicense(data);
+          if (state === "ready") {
+            showTab("scheduler");
+            return refreshSchedules();
+          }
+          return null;
+        });
+      })
+      .catch(function (e) { msg.textContent = serverMessage(e); })
+      .then(function () { button.disabled = false; });
+  }
+
+  /**
+   * The form in the service's terms. "One time" is not a recurring plan, so it
+   * carries the date the recurrence modes have no use for; the date and the time
+   * are separate fields here and are joined where the one-time run is sent.
+   */
+  function serverSchedulePayload() {
+    var mode = $("a1ud-mode").value;
+    return {
+      mode: mode,
+      time: $("a1ud-time").value,
+      timeZone: $("a1ud-tz").value,
+      onceDate: mode === "once" ? $("a1ud-oncedate").value : null,
+      days: Array.prototype.map.call($$("#a1ud-days input:checked"), function (i) { return +i.value; }),
+      scope: { groupIds: currentScopeIds() },
+      skipDriving: $("a1ud-skipdriving").checked
+    };
+  }
+
+  /** The one-time plan as the shared core reads it, for the "in the past" check. */
+  function oneTimePlan(payload) {
+    return {
+      enabled: true,
+      mode: "once",
+      time: payload.time,
+      onceDate: payload.onceDate,
+      timeZone: payload.timeZone,
+      days: []
+    };
+  }
+
+  /** The one-time run as the service reads it: a single wall-clock instant. */
+  function oneTimeRunPayload(payload) {
+    return {
+      at: payload.onceDate + "T" + payload.time,
+      timeZone: payload.timeZone,
+      scope: payload.scope,
+      skipDriving: payload.skipDriving
+    };
+  }
+
+  function hideLegacyScheduling() {
+    // The grace window, the wake lock and the "keep this page open" note
+    // describe the in-browser scheduler; they mean nothing once AWS runs it.
+    var grace = $("a1ud-grace");
+    if (grace && grace.parentNode) grace.parentNode.classList.add("a1ud-hidden");
+    var wake = $("a1ud-wakelock");
+    if (wake && wake.parentNode) wake.parentNode.classList.add("a1ud-hidden");
+    var panel = $("a1ud-tab-scheduler");
+    if (panel) Array.prototype.forEach.call(panel.querySelectorAll(".a1ud-warn"), function (el) { el.classList.add("a1ud-hidden"); });
+    show($("a1ud-schedules-card"), true);
+    $("a1ud-next").textContent = "Managed on AWS";
+    $("a1ud-countdown").textContent = "Runs on our scheduler, with or without this page open.";
+  }
+
+  function saveOnServer(msg) {
+    var payload;
+    var oneTime;
+    try {
+      payload = serverSchedulePayload();
+      oneTime = payload.mode === "once";
+      if (!/^\d{2}:\d{2}$/.test(payload.time)) throw new Error("Pick a time.");
+      if (payload.mode === "weekly" && !payload.days.length) throw new Error("Pick at least one day.");
+      if (oneTime && !payload.onceDate) throw new Error("Pick a date.");
+      if (oneTime && !core.nextOccurrence(oneTimePlan(payload), new Date())) throw new Error("That date and time is already in the past.");
+      if ($("a1ud-scope").value === "groups" && !payload.scope.groupIds.length) throw new Error("Pick at least one group, or choose All assets.");
+    } catch (e) {
+      msg.textContent = e.message;
+      return Promise.resolve();
+    }
+    $("a1ud-save").disabled = true;
+    msg.textContent = "Saving…";
+    // A one-time run is a schedule of its own, not an edit of a recurring plan —
+    // the service refuses to update one — so it is only ever added, and never
+    // becomes the thing a later Save would edit.
+    var request = oneTime
+      ? serverClient().addRun(oneTimeRunPayload(payload))
+      : editingName
+        ? serverClient().updateSchedule(Object.assign({ name: editingName }, payload))
+        : serverClient().createSchedule(payload);
+    return request
+      .then(function (data) {
+        if (!oneTime && data && data.name) editingName = data.name;
+        msg.textContent = oneTime ? "One-time run added." : "Saved.";
+        return refreshSchedules();
+      })
+      .catch(function (e) { msg.textContent = serverMessage(e); })
+      .then(function () { $("a1ud-save").disabled = false; });
+  }
+
+  function runOnServer() {
+    $("a1ud-lastresult").textContent = "Running…";
+    return serverClient()
+      .unassign({ scope: { groupIds: currentScopeIds() }, skipDriving: $("a1ud-skipdriving").checked })
+      .then(function (data) {
+        var still = data.stillAssigned ? ", " + data.stillAssigned + " still assigned" : "";
+        $("a1ud-lastresult").textContent = "Last run (manual): " + data.unassigned + " unassigned, " + data.skipped +
+          " skipped, " + data.failed + " failed" + still + ".";
+        $("a1ud-lastresult").className = "a1ud-lastresult " + (data.failed || data.stillAssigned ? "is-bad" : "is-ok");
+      })
+      .catch(function (e) {
+        $("a1ud-lastresult").textContent = "Run failed: " + serverMessage(e);
+        $("a1ud-lastresult").className = "a1ud-lastresult is-bad";
+      })
+      .then(reload); // the run log is written to Geotab, so refresh Run history
+  }
+
+  /**
+   * This database's schedules, from the deployment (which finds them by the
+   * Geotab database name the session carries). `quiet` is for the background
+   * refresh: it must not flash "Loading…" over a tab nobody asked.
+   */
+  function refreshSchedules(options_) {
+    var quiet = !!(options_ && options_.quiet);
+    var msg = $("a1ud-schedules-msg");
+    if (msg && !quiet) msg.textContent = "Loading…";
+    return serverClient()
+      .listSchedules()
+      .then(function (data) {
+        var list = (data && data.schedules) || [];
+        remoteSchedules = { known: true, list: list };
+        schedulesFetchedAt = Date.now();
+        renderSchedules(list);
+        renderStatus();
+        if (msg) msg.textContent = list.length + " schedule" + (list.length === 1 ? "" : "s");
+        return data;
+      })
+      .catch(function (e) {
+        // A refusal, or a service that cannot be reached, is not the same as
+        // "nothing is scheduled" — so the panel keeps saying AWS owns the
+        // schedule rather than naming a time it was never told.
+        remoteSchedules = { known: false, list: [] };
+        renderStatus();
+        if (msg) msg.textContent = serverMessage(e);
+        return { schedules: [] };
+      });
+  }
+
+  /**
+   * The plan in words, with the zone its wall clock is read in. A one-time run
+   * has no wall clock — it is a single instant — and the 00:00 the service keeps
+   * in its spec is a placeholder, so it names no time here: when it runs is the
+   * next-run column, in the zone it was scheduled in.
+   */
+  function scheduleWords(schedule) {
+    if (schedule.kind === "one-time") return "Once";
+    var words = schedule.mode === "weekly" ? "Weekly (" + (schedule.days || []).join(",") + ")" : "Every day";
+    if (schedule.time) words += " at " + schedule.time;
+    if (schedule.timeZone) words += " (" + schedule.timeZone + ")";
+    return words;
+  }
+
+  /** Yes/No as the preview table writes it: a tag when on, plain when off. */
+  function yesNoTag(on) {
+    return '<span class="a1ud-tag' + (on ? " is-yes" : "") + '">' + (on ? "Yes" : "No") + "</span>";
+  }
+
+  /**
+   * One row per schedule for this database. There is no "enabled" column: saving
+   * a schedule is what creates it, and nothing here switches one off — so the
+   * column that used to state that said less than what the schedule does with an
+   * asset that happens to be driving when it fires.
+   */
+  function renderSchedules(list) {
+    var tb = $("a1ud-schedules").querySelector("tbody");
+    if (!list.length) {
+      tb.innerHTML = '<tr><td colspan="6" class="a1ud-muted">Nothing scheduled yet. Set a schedule above and save.</td></tr>';
+      return;
+    }
+    tb.innerHTML = list
+      .map(function (s) {
+        var assets = s.scope && s.scope.groupIds && s.scope.groupIds.length ? s.scope.groupIds.length + " group(s)" : "All assets";
+        return "<tr><td>" + esc(scheduleWords(s)) + "</td><td>" + esc(assets) + "</td><td>" +
+          esc(s.kind) + "</td><td>" + esc(s.nextRun ? fmt(new Date(s.nextRun), s.timeZone) : "—") + "</td><td>" +
+          yesNoTag(s.skipDriving !== false) +
+          "</td><td>" +
+          // A one-time run is not editable — the service refuses, and it has no
+          // recurrence to edit — so it offers only Delete.
+          (s.kind === "one-time" ? "" : '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-edit" data-name="' + esc(s.name) + '">Edit</button> ') +
+          '<button type="button" class="a1ud-btn a1ud-secondary a1ud-sched-delete" data-name="' + esc(s.name) + '">Delete</button>' +
+          "</td></tr>";
+      })
+      .join("");
+  }
+
+  function loadScheduleIntoForm(name) {
+    return serverClient()
+      .listSchedules()
+      .then(function (data) {
+        var found = ((data && data.schedules) || []).filter(function (s) { return s.name === name; })[0];
+        if (!found) return;
+        editingName = name;
+        $("a1ud-mode").value = found.mode || "daily";
+        $("a1ud-time").value = found.time || "23:00";
+        if (found.timeZone) $("a1ud-tz").value = found.timeZone;
+        $("a1ud-skipdriving").checked = found.skipDriving !== false;
+        $("a1ud-scope").value = found.scope && found.scope.groupIds && found.scope.groupIds.length ? "groups" : "all";
+        checkedGroups = {};
+        ((found.scope && found.scope.groupIds) || []).forEach(function (id) { checkedGroups[id] = true; });
+        Array.prototype.forEach.call($$("#a1ud-days input"), function (i) {
+          i.checked = (found.days || []).indexOf(+i.value) !== -1;
+        });
+        syncModeVisibility();
+        renderGroups();
+        $("a1ud-editmsg").textContent = "Editing " + name + " — press Save Schedule to apply.";
+      })
+      .catch(function (e) { $("a1ud-editmsg").textContent = serverMessage(e); });
+  }
+
+  function deleteSchedule(name) {
+    $("a1ud-editmsg").textContent = "Deleting…";
+    return serverClient()
+      .deleteSchedule({ name: name })
+      .then(function () {
+        if (editingName === name) editingName = null;
+        $("a1ud-editmsg").textContent = "Deleted " + name + ".";
+        return refreshSchedules();
+      })
+      .catch(function (e) { $("a1ud-editmsg").textContent = serverMessage(e); });
+  }
+
+  function bindServerControls() {
+    // MyGeotab rebuilds the add-in's page element when the user navigates, and
+    // listeners live on the elements they were attached to: rebinding only when
+    // the root changes keeps Save working after a rebuild.
+    if (!serverMode() || serverBoundRoot === root) return;
+    serverBoundRoot = root;
+    $("a1ud-schedules-refresh").addEventListener("click", function () { refreshSchedules(); });
+    $("a1ud-worker-save").addEventListener("click", function () { onSaveWorker(); });
+    $("a1ud-schedules").addEventListener("click", function (event) {
+      var target = event.target;
+      if (!target || !target.getAttribute) return;
+      var name = target.getAttribute("data-name");
+      if (!name) return;
+      var classes = target.getAttribute("class") || "";
+      if (classes.indexOf("a1ud-sched-delete") !== -1) deleteSchedule(name);
+      else if (classes.indexOf("a1ud-sched-edit") !== -1) loadScheduleIntoForm(name);
+    });
+  }
+
+  /**
+   * The single place that asks about licensing and acts on the answer. A
+   * database with no service account has no schedules to list, and asking would
+   * only earn a refusal — so the licence answer decides that too.
+   */
+  function startServerMode() {
+    if (!serverMode()) return Promise.resolve(null);
+    hideLegacyScheduling();
+    bindServerControls();
+    return checkLicense().then(function (data) {
+      var state = applyLicense(data);
+      if (state === "unlicensed") return null; // the overlay explains it
+      if (state === "setup") {
+        $("a1ud-schedules-msg").textContent = "No schedules yet — register this database on the Service account setup tab.";
+        // Not registered: there is no schedule to report, and in server mode this
+        // page no longer runs one itself, so say exactly that.
+        remoteSchedules = { known: false, list: [] };
+        showNext("Not scheduled", "This database is not registered yet — see Service account setup.", "Idle");
+        return null;
+      }
+      return refreshSchedules();
+    });
+  }
+
   /* ---------------- actions ---------------- */
   function currentScopeIds() {
     return $("a1ud-scope").value === "groups" ? selectedGroupIds() : [];
@@ -962,6 +1799,7 @@ geotab.addin.unassignDrivers = function () {
 
   function onSave() {
     var msg = $("a1ud-savemsg");
+    if (serverMode()) return saveOnServer(msg);
     var s;
     try { s = readForm(); } catch (e) { msg.textContent = e.message; return; }
     $("a1ud-save").disabled = true;
@@ -996,6 +1834,9 @@ geotab.addin.unassignDrivers = function () {
 
   function onRunNowConfirm() {
     show($("a1ud-confirmwrap"), false);
+    if (serverMode()) {
+      return runOnServer().then(function () { $("a1ud-runnow").disabled = false; });
+    }
     doRun({ trigger: "manual", groupIds: currentScopeIds(), skipDriving: $("a1ud-skipdriving").checked })
       .then(function () { $("a1ud-runnow").disabled = false; });
   }
@@ -1021,12 +1862,94 @@ geotab.addin.unassignDrivers = function () {
   }
 
   /* ---------------- scheduler ---------------- */
+  /**
+   * A scheduled run happens on AWS, so when its time passes the page waits for
+   * the service to finish it and write the record, then re-reads everything it
+   * shows: the header, the schedule table, the review and the audit trail.
+   */
+  function armDueRefresh() {
+    if (dueTimer) clearTimeout(dueTimer);
+    dueTimer = setTimeout(function () {
+      dueTimer = null;
+      refreshPage();
+    }, DUE_REFRESH_DELAY_MS);
+  }
+
+  /** The whole page, re-read rather than rebuilt: no reload, no lost scroll. */
+  function refreshPage() {
+    return reload()
+      .then(function () { return serverMode() ? refreshSchedules({ quiet: true }) : null; })
+      .then(function () { return onPreview(); });
+  }
+
+  /** One merged trail: the tenant's own log and the deployment's. */
+  function historyEntries() {
+    return core.mergeRunHistory((records.log && records.log.details.entries) || [], awsRuns);
+  }
+
+  /**
+   * The audit trail on demand: both sources are re-read — the tenant's own log,
+   * and in server mode what the deployment ran while no browser was open.
+   */
+  function onRefreshHistory() {
+    var btn = $("a1ud-history-refresh");
+    var msg = $("a1ud-historymsg");
+    btn.disabled = true;
+    msg.textContent = "Refreshing…";
+    return reload()
+      .then(function () {
+        var n = historyEntries().length;
+        msg.textContent = "Updated " + fmt(new Date()) + " — " + n + " run" + (n === 1 ? "" : "s") +
+          (awsRunsError ? " (the deployment's runs could not be read)" : "");
+      })
+      .catch(function (e) { msg.textContent = "Could not refresh: " + core.errText(e); })
+      .then(function () { btn.disabled = false; });
+  }
+
   function reload() {
-    return core.loadRecords(api).then(function (r) { records = r; renderHistory(); renderStatus(); });
+    return core.loadRecords(api).then(function (r) {
+      records = r;
+      renderHistory();
+      renderStatus();
+      if (!serverMode()) return null;
+      // The tenant's log is half the story: this asks the deployment what it ran,
+      // so a scheduled run shows up even though no browser was open for it, and
+      // an attempt that failed before reaching Geotab is visible at all.
+      return serverClient()
+        .listRuns({})
+        .then(function (data) {
+          awsRuns = (data && data.runs) || [];
+          awsRunsError = null;
+          renderHistory();
+        })
+        .catch(function (e) {
+          // Unlicensed, offline, or an older deployment without the action: the
+          // history still renders from what the tenant's own log has, and says so
+          // when someone asks for it by hand.
+          awsRuns = [];
+          awsRunsError = (e && e.code) || "unavailable";
+          renderHistory();
+        });
+    });
+  }
+
+  /**
+   * Keeps the header in step with what AWS holds, so a schedule changed in
+   * another browser — or a slot that just fired — shows up without a reload.
+   * Nothing is asked while this database is not registered: that would only
+   * earn a refusal.
+   */
+  function refreshServerSchedules(force) {
+    if (!remoteSchedules.known) return Promise.resolve();
+    if (!force && Date.now() - schedulesFetchedAt < TICK_MS * RELOAD_EVERY_TICKS) return Promise.resolve();
+    return refreshSchedules({ quiet: true });
   }
 
   function tick(forceReload) {
     if (running || stopped) return Promise.resolve();
+    // In server mode AWS owns the schedule; this tab must never run one too —
+    // but it does keep the "next scheduled run" panel truthful.
+    if (serverMode()) return refreshServerSchedules(forceReload);
     tickCount++;
     var s0 = sched();
     var localDue = s0 && core.evaluateDue(s0, new Date()).action !== "none";
@@ -1070,6 +1993,9 @@ geotab.addin.unassignDrivers = function () {
     stopped = true;
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+    // The refresh armed after a scheduled slot goes with them: a superseded copy
+    // of the add-in must not keep re-reading the service on its own.
+    if (dueTimer) { clearTimeout(dueTimer); dueTimer = null; }
     document.removeEventListener("visibilitychange", onVisibility);
     if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
   }
@@ -1121,6 +2047,16 @@ geotab.addin.unassignDrivers = function () {
   }
 
   /* ---------------- lifecycle ---------------- */
+  /**
+   * The review is what this page is for: what is assigned right now. MyGeotab
+   * gives the add-in a short viewport, and the status card plus Step 1 push the
+   * review three screens down, so the page opens on it.
+   */
+  function showReview() {
+    var review = $("a1ud-review");
+    if (review && review.scrollIntoView) review.scrollIntoView({ block: "start" });
+  }
+
   return {
     initialize: function (freshApi, state, callback) {
       api = freshApi;
@@ -1132,19 +2068,25 @@ geotab.addin.unassignDrivers = function () {
           show($("a1ud-loading"), false);
           if (!who.isAdmin) { show($("a1ud-denied"), true); return; }
           show($("a1ud-app"), true);
+          // startServerMode() below owns the licence check: it binds the service
+          // controls, applies the licence decision and then decides whether the
+          // schedules list is worth asking for.
           return Promise.all([
             reload(),
             call("Get", { typeName: "Group" }).then(function (gs) {
               groups = (gs || []).map(function (g) { return { id: g.id, label: g.name || g.id }; })
                 .sort(function (a, b) { return a.label.localeCompare(b.label); });
             }).catch(function () { groups = []; })
-          ]).then(function () {
-            fillForm();
-            renderGroups();
-            onPreview();
-            startTimers();
-            tick(true);
-          });
+          ])
+            .then(function () {
+              fillForm();
+              renderGroups();
+              onPreview();
+              startServerMode();
+              showReview();
+              startTimers();
+              tick(true);
+            });
         })
         .catch(function (e) {
           $("a1ud-loading").textContent = "Could not start: " + core.errText(e);
@@ -1159,7 +2101,12 @@ geotab.addin.unassignDrivers = function () {
         // fresh page element: restore what the user sees
         show($("a1ud-loading"), false);
         show($(me.isAdmin ? "a1ud-app" : "a1ud-denied"), true);
-        if (me.isAdmin) { fillForm(); renderGroups(); renderHistory(); renderStatus(); onPreview(); }
+        // The rebuilt element comes back with the setup card and the overlay
+        // hidden; startServerMode() re-applies the licence decision and rebinds
+        // the controls it lives on (a no-op outside service mode).
+        if (me.isAdmin) {
+          fillForm(); renderGroups(); renderHistory(); renderStatus(); onPreview(); startServerMode(); showReview();
+        }
       }
       if (me && me.isAdmin) { startTimers(); tick(true); syncWakeLock(); }
     },

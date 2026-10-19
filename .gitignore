@@ -1,0 +1,27 @@
+# Local infrastructure state / plans (never commit)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+*.auto.tfvars
+crash.log
+
+# Lambda deployment artifact, built by scripts/deploy.sh (never commit)
+dist/
+
+# Node (pnpm; the project has no dependencies — the Lambda runtime provides SDK v3)
+node_modules/
+pnpm-debug.log*
+
+# Local secrets
+.env
+.env.*
+
+# Captured browser traces may contain live sessions, customer database names,
+# user identities and correlation IDs. Keep them out of a public repo.
+docs/exampleSecurityFilterCheck.txt
+*.har
+
+# OS noise
+.DS_Store

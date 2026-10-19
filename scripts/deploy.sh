@@ -1,0 +1,1304 @@
+#!/usr/bin/env bash
+#
+# scripts/deploy.sh — deploy (or destroy) one regional instance of the unassign
+# service: Canada (ca-central-1) or the United States (us-east-2).
+#
+# Brief §7 Step 8 / R10: preflight, bootstrap the state bucket, build the Lambda
+# artifact, plan, summarise the plan, ask, apply, verify. Re-running with nothing
+# to do prints "No changes" and exits 0. There is no path to `tofu destroy`
+# without --destroy plus typing the deployment name.
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_NAME="scripts/deploy.sh"
+# shellcheck source=scripts/lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
+REGION_RAW=""
+ASSUME_YES=0
+PLAN_ONLY=0
+FORCE=0
+DESTROY=0
+SELFTEST=0
+
+PLAN_DIR=""
+PLAN_PATH=""
+PLAN_JSON_PATH=""
+PLAN_NAME="deploy.tfplan"
+
+usage() {
+  cat <<'USAGE'
+scripts/deploy.sh — deploy one regional instance of the Scheduled Driver Unassign
+service (Lambda + EventBridge Scheduler + S3 config + alarms).
+
+Usage:
+  scripts/deploy.sh [--region ca|us] [options]
+
+Options:
+  --region ca|us   Canada (ca-central-1) or United States (us-east-2).
+                   Asked interactively when omitted.
+  --yes, -y        Skip the "apply this plan?" confirmation.
+  --plan-only      Plan and print the summary, then stop (no prompt, no apply).
+  --force          Adopt an existing state bucket / state key whose deployment
+                   marker does not match the current account and region.
+  --destroy        Plan and apply a destroy of this deployment's resources.
+                   Always requires typing the deployment name to confirm;
+                   --yes does NOT skip that.
+  --selftest       Run the offline self-tests for the script's pure helpers.
+  --help, -h       Show this text.
+
+What it does, in order:
+  1. checks aws, tofu (>= 1.10), jq and zip are installed;
+  2. checks the AWS credentials and that the environment region matches --region;
+  3. creates the state bucket advone-<region>-deploy if missing (versioning,
+     SSE, public access blocked, bucket-owner-enforced) and writes or verifies
+     this service's ownership marker inside it; every object it owns lives under
+     the $SERVICE_SLUG/ prefix, because other services share that bucket;
+  4. builds dist/lambda.zip from src/ (zero runtime dependencies);
+  5. tofu init -reconfigure against infra/backend/<ca|us>.hcl, then plan;
+  6. prints a summary of what will be added, changed and destroyed;
+  7. applies, prints the outputs and smoke-tests the health action;
+  8. publishes the add-in page to the region's hosting bucket, stamped with that
+     region's endpoint, and prints the add-in configuration to paste into MyGeotab.
+
+Examples:
+  scripts/deploy.sh --region ca
+  scripts/deploy.sh --region us --plan-only
+  scripts/deploy.sh --region ca --yes
+  scripts/deploy.sh --region ca --destroy
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------------
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --region)
+      [ "$#" -ge 2 ] || die_fix "--region needs a value" "pass --region ca (Canada) or --region us (United States)"
+      REGION_RAW="$2"
+      shift 2
+      ;;
+    --region=*)
+      REGION_RAW="${1#--region=}"
+      shift
+      ;;
+    --yes|-y)   ASSUME_YES=1; shift ;;
+    --plan-only) PLAN_ONLY=1; shift ;;
+    --force)    FORCE=1; shift ;;
+    --destroy)  DESTROY=1; shift ;;
+    --selftest) SELFTEST=1; shift ;;
+    --help|-h)  usage; exit 0 ;;
+    *) die_fix "unknown argument '$1'" "run '$SCRIPT_NAME --help' to see the accepted flags" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Self-tests (pure helpers only: no AWS, no tofu)
+# ---------------------------------------------------------------------------
+deployment_marker_json() { # <deploymentName> <region> <accountId> <createdAt> <createdBy> <deploymentId>
+  jq -n --arg deploymentName "$1" --arg region "$2" --arg accountId "$3" \
+        --arg createdAt "$4" --arg createdBy "$5" --arg deploymentId "$6" \
+    '{deploymentName: $deploymentName,
+      region: $region,
+      accountId: $accountId,
+      createdAt: $createdAt,
+      createdBy: $createdBy,
+      deploymentId: $deploymentId}'
+}
+
+# plan_rows — stdin: the JSON produced by `tofu show -json`; stdout: one
+# "kind<TAB>address" line per changed resource, plus "output<TAB>name" lines for
+# changed outputs. Pure jq over a plan document.
+#
+# Never hand this the .tfplan file: that is a zip, not JSON, and jq reports the
+# binary bytes as "Invalid numeric literal". Use read_plan_json to convert it.
+plan_rows() {
+  jq -r '
+    def act:
+      (.change.actions // []) as $a
+      | if (($a | index("delete")) != null) and (($a | index("create")) != null) then "replace"
+        elif ($a | index("create")) != null then "create"
+        elif ($a | index("delete")) != null then "destroy"
+        elif ($a | index("update")) != null then "update"
+        else "no-op" end;
+    ((.resource_changes // [])[] | select(act != "no-op") | "\(act)\t\(.address)"),
+    ((.output_changes // {}) | to_entries[]
+      | select(((.value.actions // []) | index("no-op")) == null)
+      | "output\t\(.key)")
+  '
+}
+
+# read_plan_json <planfile> <outfile> — converts a .tfplan to JSON with
+# `tofu show -json` and dies clearly if that fails.
+read_plan_json() {
+  local plan="$1" out="$2" rc
+  rc=0
+  tofu -chdir="$TF_DIR" show -json "$plan" > "$out" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
+    die_fix "could not read $plan as a plan (tofu show -json failed)" \
+            "re-run the plan step: the file must be the .tfplan written by tofu plan -out"
+  fi
+}
+
+# render_plan_rows <plan_rows output> — human lines, destroys and replaces in red.
+render_plan_rows() {
+  printf '%s\n' "${1:-}" | while IFS=$'\t' read -r action address; do
+    [ -n "$action" ] || continue
+    case "$action" in
+      create)  printf '%s\n' "  ${C_GREEN}+ create${C_RESET}   $address" ;;
+      update)  printf '%s\n' "  ${C_YELLOW}~ change${C_RESET}   $address" ;;
+      destroy) printf '%s\n' "  ${C_RED}- DESTROY${C_RESET}  $address" ;;
+      replace) printf '%s\n' "  ${C_RED}-/+ REPLACE${C_RESET} $address" ;;
+      output)  printf '%s\n' "  ${C_DIM}out      $address${C_RESET}" ;;
+      *)       printf '%s\n' "  $action $address" ;;
+    esac
+  done
+}
+
+run_selftest() {
+  local code marker rows counts rendered
+
+  for code in ca us; do
+    st_eq "region $code -> aws region" "$(case $code in ca) echo ca-central-1 ;; us) echo us-east-2 ;; esac)" "$(region_field "$code" region)"
+    st_eq "region $code -> deployment name" "$(case $code in ca) echo advone-ca-central ;; us) echo advone-east-2 ;; esac)" "$(region_field "$code" deployment)"
+    st_eq "region $code -> state bucket" "$(case $code in ca) echo advone-ca-central-deploy ;; us) echo advone-east-2-deploy ;; esac)" "$(region_field "$code" state)"
+    st_eq "region $code -> config bucket" "$(case $code in ca) echo advone-ca-central-config ;; us) echo advone-east-2-config ;; esac)" "$(region_field "$code" config)"
+    st_eq "region $code -> add-in hosting bucket" "$(case $code in ca) echo advone-addin-hosting-ca-central-1 ;; us) echo advone-addinhosting-us-east-2 ;; esac)" "$(region_field "$code" addin)"
+  done
+
+  # The artifact is deployed from S3 under a content-addressed key, which is what
+  # keeps the provider away from the 48 KiB ceiling it inlines a local archive at.
+  st_eq "the artifact key names its content" "artifacts/lambda-abc123.zip" "$(artifact_key abc123)"
+  local digest="$PLAN_DIR/selftest-digest"
+  printf '%s' "" > "$digest"
+  st_eq "a sha256 of an empty file (known value)" "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" "$(file_sha256 "$digest")"
+  printf 'x' > "$digest"
+  st_eq "a one-byte file hashes differently" "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881" "$(file_sha256 "$digest")"
+  st_false "a missing file is reported, not hashed" file_sha256 "$PLAN_DIR/absent-artifact.zip"
+
+  # The add-in page: one object per region, under this service's prefix, and the
+  # endpoint stamped in at upload time so each region names its own deployment.
+  st_eq "the add-in object lives under the service prefix" "unassign/unassignDrivers.html" "$(addin_object_key)"
+  st_eq "the add-in URL is the HTTPS REST endpoint (the website one is HTTP-only)" \
+        "https://advone-addin-hosting-ca-central-1.s3.ca-central-1.amazonaws.com/unassign/unassignDrivers.html" \
+        "$(addin_object_url "$(region_field ca addin)" ca-central-1 "$(addin_object_key)")"
+  st_eq "a trailing slash is stripped from the endpoint" "https://x.lambda-url.ca-central-1.on.aws" \
+        "$(strip_trailing_slashes 'https://x.lambda-url.ca-central-1.on.aws/')"
+  st_eq "an endpoint with no slash is left alone" "https://x.example" "$(strip_trailing_slashes 'https://x.example')"
+  st_eq "an empty endpoint stays empty" "" "$(strip_trailing_slashes '')"
+  local addin_fixture="$PLAN_DIR/selftest-addin.html"
+  printf '%s\n' '<html><script>' '  var SERVER_API_BASE = "https://old.lambda-url.ca-central-1.on.aws";' '</script></html>' > "$addin_fixture"
+  local addin_ca="https://aaa.lambda-url.ca-central-1.on.aws" addin_us="https://bbb.lambda-url.us-east-2.on.aws"
+  st_eq "the page names the endpoint it is published for" "$addin_us" \
+        "$(render_addin_html "$addin_fixture" "$addin_us" | grep -o 'https://bbb[^"]*')"
+  st_true "the page keeps everything else" test "$(render_addin_html "$addin_fixture" "$addin_us" | grep -c '<html><script>')" = "1"
+  # Lambda hands out its URL with a trailing slash; the add-in joins "/license"
+  # onto it, so a second slash must never reach the page.
+  st_eq "a slashed endpoint is published without the double slash" "$addin_ca" \
+        "$(render_addin_html "$addin_fixture" "$addin_ca/" | grep -o 'https://aaa[^"]*')"
+  st_eq "the other region's endpoint is gone" "0" \
+        "$(render_addin_html "$addin_fixture" "$addin_us" | grep -c 'ca-central-1.on.aws' || true)"
+  # Note for anyone adding cases here: a shell function cannot be called from
+  # `bash -c` (it is not exported), and such an assertion passes for the wrong
+  # reason — "command not found" instead of the behaviour under test. Compare
+  # captured output instead, as above.
+  local addin_once="$PLAN_DIR/selftest-addin-once.html"
+  render_addin_html "$addin_fixture" "$addin_ca" > "$addin_once"
+  st_eq "rendering is idempotent" "$(render_addin_html "$addin_fixture" "$addin_ca")" "$(render_addin_html "$addin_once" "$addin_ca")"
+  st_true "the rendered page still ends with a newline" bash -c "tail -c1 '$addin_once' | od -c | grep -q '\\\\n'"
+  st_false "a page with no endpoint to stamp is refused" render_addin_html "$addin_fixture" ""
+  local addin_noendpoint="$PLAN_DIR/selftest-addin-noendpoint.html"
+  printf '%s\n' '<html><script>' '  var SOMETHING_ELSE = 1;' '</script></html>' > "$addin_noendpoint"
+  st_false "a page without a SERVER_API_BASE line is refused" render_addin_html "$addin_noendpoint" "$addin_ca"
+  st_false "a missing add-in file is refused" render_addin_html "$PLAN_DIR/absent.html" "$addin_ca"
+  # One committed configuration per region, naming that region's published page.
+  st_eq "config path for ca" "$REPO_ROOT/config.ca.json" "$(addin_config_path "$REPO_ROOT" ca)"
+  st_eq "config path for us" "$REPO_ROOT/config.us.json" "$(addin_config_path "$REPO_ROOT" us)"
+  for code in ca us; do
+    st_eq "config.$code.json names the page this script publishes" \
+          "$(addin_object_url "$(region_field "$code" addin)" "$(region_field "$code" region)" "$(addin_object_key)")" \
+          "$(addin_config_url "$(addin_config_path "$REPO_ROOT" "$code")" || true)"
+  done
+  st_false "a missing configuration file is reported, not guessed" \
+           addin_config_url "$PLAN_DIR/absent-config.json"
+
+  # The bucket's CORS rule mirrors the service's own ALLOWED_ORIGINS, so the page
+  # and the translations are fetchable from a MyGeotab frame.
+  st_eq "the add-in prefix" "unassign/" "$(addin_prefix)"
+  st_eq "translations live beside the page" "unassign/translations/en.json" "$(addin_translation_key en)"
+  st_eq "both languages the configuration declares" "en fr" "$(addin_translation_langs | paste -sd' ' -)"
+  st_true "S3 can express the service's origin pattern" s3_cors_origin_ok "https://*.geotab.com"
+  st_true "S3 can express a bare wildcard" s3_cors_origin_ok "*"
+  st_false "S3 cannot express two wildcards in one origin" s3_cors_origin_ok "https://*.*.geotab.com"
+  st_false "an empty origin is not expressible" s3_cors_origin_ok ""
+  # Built with map(join) rather than one joined expression per element: in jq,
+  # `a | b, c` binds as `a | (b, c)`, which joins the first list twice over.
+  st_eq "the CORS rule allows exactly the deployment's origins, and only reads" \
+        "https://*.geotab.com|http://localhost:3000|GET|HEAD|*" \
+        "$(addin_cors_rule_json 'https://*.geotab.com, http://localhost:3000' \
+           | jq -r '[.CORSRules[0].AllowedOrigins, .CORSRules[0].AllowedMethods, .CORSRules[0].AllowedHeaders] | map(join("|")) | join("|")')"
+  st_false "a CORS rule without origins is refused" addin_cors_rule_json ""
+  st_false "a CORS rule with an origin S3 cannot express is refused" addin_cors_rule_json "https://*.*.example.com"
+  for lang in $(addin_translation_langs); do
+    st_true "translations/$lang.json exists in the repo" test -f "$REPO_ROOT/translations/$lang.json"
+    st_true "translations/$lang.json is a JSON object" bash -c \
+            "jq -e 'type == \"object\"' '$REPO_ROOT/translations/$lang.json' >/dev/null"
+  done
+  # What the upload says about the copy that was already there.
+  st_eq "a bucket with no page yet says nothing about the previous copy" "" "$(addin_upload_note "" "\"abc\"")"
+  st_eq "an unchanged page is reported as identical" "identical" "$(addin_upload_note "\"abc\"" "\"abc\"")"
+  st_eq "a changed page is reported as changed" "changed" "$(addin_upload_note "\"abc\"" "\"def\"")"
+  st_eq "unquoted etags compare the same way" "identical" "$(addin_upload_note "abc" "\"abc\"")"
+  st_eq "a missing previous etag (None from the CLI) says nothing" "" "$(addin_upload_note "None" "\"abc\"")"
+  st_eq "region arg 'ca' maps to code" "ca" "$(region_code_from_arg ca)"
+  st_eq "region arg 'us' maps to code" "us" "$(region_code_from_arg us)"
+  st_eq "region arg 'ca-central-1' maps to code" "ca" "$(region_code_from_arg ca-central-1)"
+  st_false "region arg 'mars' is rejected" region_code_from_arg mars
+  st_false "region arg '' is rejected" region_code_from_arg ""
+
+  st_eq "backend hcl path" "$REPO_ROOT/infra/backend/ca.hcl" "$(backend_hcl_path ca)"
+  st_true "OpenTofu 1.12.6 satisfies >= 1.10" version_ge "1.12.6" "1.10"
+  st_true "OpenTofu 1.10.0 satisfies >= 1.10" version_ge "1.10.0" "1.10"
+  st_false "OpenTofu 1.9.9 does not satisfy >= 1.10" version_ge "1.9.9" "1.10"
+
+  st_eq "tenant schedule-group prefix is the contract default" "UnassignDriverSchedules" "$SCHEDULE_GROUP_PREFIX"
+
+  st_eq "a pattern becomes a concrete origin for the CORS probe" "https://my.geotab.com" \
+        "$(probe_origin_from_pattern 'https://*.geotab.com')"
+  st_eq "an exact origin is left alone" "https://my.geotab.com" "$(probe_origin_from_pattern 'https://my.geotab.com')"
+  st_eq "a bare wildcard probes the MyGeotab origin" "https://my.geotab.com" "$(probe_origin_from_pattern '*')"
+  st_eq "an empty entry probes the MyGeotab origin" "https://my.geotab.com" "$(probe_origin_from_pattern '')"
+
+  st_eq "state key lives under the service prefix" "scheduled-driver-unassign/terraform.tfstate" "$STATE_KEY"
+  st_eq "ownership marker lives under the same prefix" "scheduled-driver-unassign/deployment.json" "$DEPLOYMENT_MARKER_KEY"
+  st_eq "the pre-prefix state key is still tracked for migration" "unassign/terraform.tfstate" "$LEGACY_STATE_KEY"
+  st_eq "another service's state is not ours" "scheduled-driver-unassign/terraform.tfstate" \
+        "$(printf '%s\n' "other-service/terraform.tfstate" "scheduled-driver-unassign/terraform.tfstate" | filter_our_state_keys)"
+  st_eq "unprefixed state is not ours" "" \
+        "$(printf '%s\n' "unassign/terraform.tfstate" "other-service/terraform.tfstate" | filter_our_state_keys)"
+  st_eq "the state lock file is not counted as state" "scheduled-driver-unassign/terraform.tfstate" \
+        "$(printf '%s\n' "scheduled-driver-unassign/terraform.tfstate.tflock" "scheduled-driver-unassign/terraform.tfstate" | filter_our_state_keys)"
+  for code in ca us; do
+    st_eq "infra/backend/$code.hcl declares the contract state key" "$STATE_KEY" \
+          "$(backend_hcl_key "$(backend_hcl_path "$code")")"
+  done
+  local hcl_fixture="$PLAN_DIR/selftest-backend.hcl"
+  printf '%s\n' 'bucket = "somewhere"' 'key    = "other-service/terraform.tfstate"' > "$hcl_fixture"
+  st_eq "a backend config naming another service is read correctly" "other-service/terraform.tfstate" "$(backend_hcl_key "$hcl_fixture")"
+  st_false "a backend config naming another service is refused" test \
+           "$(backend_hcl_key "$hcl_fixture")" = "$STATE_KEY"
+
+  # Artifact check. The archive built from this repo must pass, and the check
+  # must not be defeated by the pipefail/SIGPIPE trap it used to fall into.
+  local zdir="$PLAN_DIR/selftest-zip"
+  if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+    mkdir -p "$zdir/pkg/src/lambda" "$zdir/pkg/src/core"
+    : > "$zdir/pkg/src/lambda/handler.js"
+    : > "$zdir/pkg/src/core/unassign-core.js"
+    ( cd "$zdir/pkg" && zip -qr "$zdir/good.zip" src )
+    ( cd "$zdir/pkg" && zip -qr "$zdir/bad.zip" src/core )
+    st_true "artifact check finds the handler under src/" lambda_zip_has_handler "$zdir/good.zip"
+    st_false "artifact check rejects an archive without the handler" lambda_zip_has_handler "$zdir/bad.zip"
+    st_false "artifact check rejects a missing archive" lambda_zip_has_handler "$zdir/absent.zip"
+    if [ -f "$REPO_ROOT/src/lambda/handler.js" ]; then
+      ( cd "$REPO_ROOT" && zip -qr "$zdir/repo.zip" src -x '*.DS_Store' -x '*node_modules*' -x 'test/*' )
+      st_true "an archive built from this repo's src passes the artifact check" lambda_zip_has_handler "$zdir/repo.zip"
+      st_true "the archive holds src/ at its root" bash -c "unzip -Z1 '$zdir/repo.zip' | grep -c '^src/lambda/handler.js$' | grep -qx 1"
+    fi
+  else
+    st_true "artifact check skipped: zip/unzip not installed" true
+  fi
+
+  marker="$(deployment_marker_json "advone-ca-central" "ca-central-1" "123456789012" "2026-10-15T00:00:00Z" "arn:aws:iam::123456789012:user/ops" "11111111-2222-3333-4444-555555555555")"
+  st_eq "marker: deploymentName" "advone-ca-central" "$(printf '%s' "$marker" | jq -r .deploymentName)"
+  st_eq "marker: region" "ca-central-1" "$(printf '%s' "$marker" | jq -r .region)"
+  st_eq "marker: accountId" "123456789012" "$(printf '%s' "$marker" | jq -r .accountId)"
+  st_true "marker: carries the 6 expected keys" test "$(printf '%s' "$marker" | jq -r 'keys | length')" = "6"
+  st_true "marker: createdAt is ISO8601 Z" test "$(printf '%s' "$marker" | jq -r .createdAt)" = "2026-10-15T00:00:00Z"
+
+  local fixture="$PLAN_DIR/selftest-plan.json"
+  cat > "$fixture" <<'JSON'
+{
+  "resource_changes": [
+    {"address": "module.lambda.aws_lambda_function.this", "change": {"actions": ["create"]}},
+    {"address": "module.lambda.aws_iam_role.this", "change": {"actions": ["create"]}},
+    {"address": "aws_s3_bucket.config", "change": {"actions": ["update"]}},
+    {"address": "aws_sns_topic.alarms", "change": {"actions": ["delete"]}},
+    {"address": "aws_cloudwatch_log_group.this", "change": {"actions": ["delete", "create"], "replace_paths": [["retention_in_days"]]}},
+    {"address": "aws_scheduler_schedule.unrelated", "change": {"actions": ["no-op"]}}
+  ],
+  "output_changes": {
+    "function_url": {"actions": ["create"]},
+    "config_bucket": {"actions": ["no-op"]}
+  }
+}
+JSON
+  rows="$(plan_rows < "$fixture")"
+  counts="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="create"{a++} $1=="update"{c++} $1=="destroy"{d++} $1=="replace"{r++} END{printf "%d %d %d %d", a+0, c+0, d+0, r+0}')"
+  st_eq "plan rows: 2 add / 1 change / 1 destroy / 1 replace" "2 1 1 1" "$counts"
+  st_true "plan rows: no-op resource omitted" test "$(printf '%s\n' "$rows" | grep -c 'unrelated' || true)" = "0"
+  st_true "plan rows: replace detected from delete+create" test "$(printf '%s\n' "$rows" | grep -c 'replace.aws_cloudwatch_log_group.this')" = "1"
+  st_true "plan rows: changed output listed" test "$(printf '%s\n' "$rows" | grep -c 'output.function_url')" = "1"
+
+  rendered="$(render_plan_rows "$rows")"
+  st_true "plan rendering marks a destroy" test "$(printf '%s\n' "$rendered" | grep -c 'DESTROY.*aws_sns_topic.alarms')" = "1"
+  st_true "plan rendering marks a replace" test "$(printf '%s\n' "$rendered" | grep -c 'REPLACE.*aws_cloudwatch_log_group.this')" = "1"
+  st_true "plan rendering marks an add" test "$(printf '%s\n' "$rendered" | grep -c 'create.*module.lambda.aws_lambda_function.this')" = "1"
+  st_true "plan rendering marks a one-line output change" test "$(printf '%s\n' "$rendered" | grep -c 'function_url')" = "1"
+
+  local empty="$PLAN_DIR/selftest-plan-empty.json"
+  printf '%s\n' '{"resource_changes": [], "output_changes": {}}' > "$empty"
+  st_eq "plan rows: empty plan has no rows" "" "$(plan_rows < "$empty")"
+
+  # Regression: the summary once handed the .tfplan itself to jq, which is a zip.
+  # Offline, the cheapest proof is that the conversion step exists and that no
+  # call site feeds the plan file to jq directly.
+  local fakeplan="$PLAN_DIR/selftest-fake.tfplan"
+  printf 'PK\003\004not json, like a real plan file' > "$fakeplan"
+  st_false "a .tfplan file is not readable as JSON" bash -c "jq . '$fakeplan' >/dev/null 2>&1"
+  st_true "the summary converts the plan with read_plan_json" \
+          grep -q 'read_plan_json "\$PLAN_PATH" "\$PLAN_JSON_PATH"' "$SCRIPT_DIR/deploy.sh"
+  st_false "nothing hands the plan file straight to jq" \
+           grep -nE 'jq[^|]*"\$PLAN_PATH"' "$SCRIPT_DIR/deploy.sh"
+
+  # The health check has to understand both response shapes a direct invoke can
+  # return; getting this wrong turns a healthy deployment into a warning.
+  st_eq "health: an HTTP envelope with a good body" "ok: ok advone-ca-central" \
+        "$(health_result '{"statusCode":200,"headers":{},"body":"{\"ok\":true,\"data\":{\"status\":\"ok\",\"deployment\":\"advone-ca-central\"}}"}')"
+  st_eq "health: a bare result is accepted too" "ok: ok advone-ca-central" \
+        "$(health_result '{"ok":true,"data":{"status":"ok","deployment":"advone-ca-central"}}')"
+  st_eq "health: an error envelope is reported by code" "bad: LICENSE_REQUIRED This database is not licensed." \
+        "$(health_result '{"statusCode":403,"body":"{\"ok\":false,\"error\":{\"code\":\"LICENSE_REQUIRED\",\"message\":\"This database is not licensed.\"}}"}')"
+  st_eq "health: an unreadable response is reported" "bad: unreadable response" "$(health_result 'not json')"
+  st_eq "health: an empty response is reported" "bad: unreadable response" "$(health_result '')"
+
+  # Header parsing for the CORS preflight check, whose remaining logic needs AWS.
+  local hdr="$PLAN_DIR/selftest-headers.txt"
+  printf '%s\r\n' 'HTTP/2 200' 'access-control-allow-origin: https://my.geotab.com' 'access-control-allow-methods: POST' 'content-type: application/json' > "$hdr"
+  st_eq "preflight headers: allow-origin" "https://my.geotab.com" "$(header_value "$hdr" 'access-control-allow-origin')"
+  st_eq "preflight headers: allow-methods" "POST" "$(header_value "$hdr" 'access-control-allow-methods')"
+  st_eq "preflight headers: status line" "HTTP/2 200" "$(header_value "$hdr" 'HTTP')"
+  st_eq "preflight headers: absent header is empty" "" "$(header_value "$hdr" 'access-control-allow-credentials')"
+  # A missing header must not fail the caller: assignment position plus pipefail
+  # would abort the script right where it should be reporting a refused preflight.
+  local hdr_missing
+  hdr_missing="$(header_value "$hdr" 'access-control-allow-credentials')"
+  st_eq "preflight headers: a missing header does not fail an assignment" "" "$hdr_missing"
+  printf '%s\n' 'HTTP/2 403' 'content-type: application/json' > "$hdr"
+  st_eq "preflight headers: a refused preflight has no allow-origin" "" "$(header_value "$hdr" 'access-control-allow-origin')"
+
+  st_done "$SCRIPT_NAME"
+}
+
+# ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+AWS_ACCOUNT_ID=""
+AWS_CALLER_ARN=""
+TOFU_VERSION=""
+DEPLOYMENT_ID=""
+
+preflight_commands() {
+  require_command aws jq zip
+  require_tofu_1_10
+  info "OpenTofu $TOFU_VERSION, AWS CLI $(aws --version 2>&1 | awk '{print $1}')"
+}
+
+caller_identity() {
+  local out
+  if ! out="$(aws_try sts get-caller-identity --output json)"; then
+    die_fix "$(aws_error_reason "$(aws_last_err)") while calling aws sts get-caller-identity" \
+            "run \"aws configure\" (or \"aws sso login\") for the account that owns $DEPLOYMENT_NAME, then re-run $SCRIPT_NAME --region $REGION_CODE"
+  fi
+  AWS_ACCOUNT_ID="$(printf '%s' "$out" | jq -r '.Account')"
+  AWS_CALLER_ARN="$(printf '%s' "$out" | jq -r '.Arn')"
+  info "AWS account $AWS_ACCOUNT_ID as $AWS_CALLER_ARN"
+}
+
+check_environment_region() {
+  local configured="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+  if [ -z "$configured" ]; then
+    configured="$(aws configure get region 2>/dev/null || true)"
+  fi
+  if [ -n "$configured" ] && [ "$configured" != "$AWS_REGION" ]; then
+    if [ "$FORCE" -eq 0 ]; then
+      die_fix "your AWS environment is configured for region '$configured' but --region $REGION_CODE deploys to $AWS_REGION" \
+              "unset AWS_REGION/AWS_DEFAULT_REGION (or run \"aws configure set region $AWS_REGION\"), or re-run with --force"
+    fi
+    warn "environment region '$configured' differs from $AWS_REGION — continuing because of --force"
+  fi
+}
+
+check_scheduler_access() {
+  if ! aws_try scheduler list-schedule-groups --max-results 1 >/dev/null; then
+    die_fix "$(aws_error_reason "$(aws_last_err)") while listing EventBridge Scheduler groups in $AWS_REGION" \
+            "grant scheduler:ListScheduleGroups to $AWS_CALLER_ARN, and confirm EventBridge Scheduler is available in $AWS_REGION"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# State bucket bootstrap
+# ---------------------------------------------------------------------------
+must_aws() { # <what> <fix> <aws args...>
+  local what="$1" fix="$2"; shift 2
+  if ! aws_try "$@" >/dev/null; then
+    die_fix "$(aws_error_reason "$(aws_last_err)") while trying to $what" "$fix"
+  fi
+}
+
+state_bucket_exists() { # 0 exists, 1 missing, dies on anything else
+  if aws_try s3api head-bucket --bucket "$STATE_BUCKET" >/dev/null; then
+    return 0
+  fi
+  case "$(aws_last_err)" in
+    *404*|*NoSuchBucket*|*"Not Found"*) return 1 ;;
+    *403*|*Forbidden*|*AccessDenied*)
+      die_fix "the state bucket $STATE_BUCKET exists but is not readable by $AWS_CALLER_ARN" \
+              "check the bucket owner (aws s3api get-bucket-location --bucket $STATE_BUCKET) — R1 allows exactly one owner per region"
+      ;;
+    *)
+      die_fix "$(aws_error_reason "$(aws_last_err)") while checking the state bucket $STATE_BUCKET" \
+              "verify with: aws s3api head-bucket --bucket $STATE_BUCKET --region $AWS_REGION"
+      ;;
+  esac
+}
+
+create_state_bucket() {
+  info "creating state bucket s3://$STATE_BUCKET in $AWS_REGION"
+  must_aws "create s3://$STATE_BUCKET" \
+           "grant s3:CreateBucket (and check the bucket name is free) then re-run" \
+           s3api create-bucket --bucket "$STATE_BUCKET" \
+           --create-bucket-configuration "LocationConstraint=$AWS_REGION"
+  local i=0
+  while [ "$i" -lt 30 ]; do
+    if aws_try s3api head-bucket --bucket "$STATE_BUCKET" >/dev/null; then return 0; fi
+    i=$((i + 1))
+    sleep 1
+  done
+  die_fix "s3://$STATE_BUCKET was created but is not yet visible" "wait a few seconds and re-run $SCRIPT_NAME --region $REGION_CODE"
+}
+
+configure_state_bucket() {
+  local location
+  location="$(aws_try s3api get-bucket-location --bucket "$STATE_BUCKET" --query 'LocationConstraint' --output text || true)"
+  if [ -n "$location" ] && [ "$location" != "None" ] && [ "$location" != "$AWS_REGION" ]; then
+    die_fix "the state bucket $STATE_BUCKET lives in '$location', not $AWS_REGION" \
+            "a deployment is one bucket in one region (R1): use the deployment that owns that bucket, or pass --force only after moving the state by hand"
+  fi
+
+  must_aws "enable versioning on s3://$STATE_BUCKET" \
+           "grant s3:PutBucketVersioning on arn:aws:s3:::$STATE_BUCKET" \
+           s3api put-bucket-versioning --bucket "$STATE_BUCKET" --versioning-configuration Status=Enabled
+  must_aws "encrypt s3://$STATE_BUCKET" \
+           "grant s3:PutEncryptionConfiguration on arn:aws:s3:::$STATE_BUCKET" \
+           s3api put-bucket-encryption --bucket "$STATE_BUCKET" \
+           --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
+  must_aws "block public access on s3://$STATE_BUCKET" \
+           "grant s3:PutBucketPublicAccessBlock on arn:aws:s3:::$STATE_BUCKET" \
+           s3api put-public-access-block --bucket "$STATE_BUCKET" \
+           --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+  must_aws "set bucket-owner-enforced ownership on s3://$STATE_BUCKET" \
+           "grant s3:PutBucketOwnershipControls on arn:aws:s3:::$STATE_BUCKET" \
+           s3api put-bucket-ownership-controls --bucket "$STATE_BUCKET" \
+           --ownership-controls '{"Rules":[{"ObjectOwnership":"BucketOwnerEnforced"}]}'
+}
+
+# This service's tfstate object keys in the state bucket, one per line. The
+# listing is prefixed, so another Advantage One service storing its state in the
+# same bucket is neither counted nor touched.
+state_keys() {
+  aws_try s3api list-objects-v2 --bucket "$STATE_BUCKET" --prefix "$SERVICE_SLUG/" \
+          --query 'Contents[].Key' --output json 2>/dev/null \
+    | jq -r '.[]?' 2>/dev/null \
+    | filter_our_state_keys || true
+}
+
+check_state_keys() {
+  local keys extra
+  keys="$(state_keys)"
+  extra="$(printf '%s\n' "$keys" | grep -v -x "$STATE_KEY" | grep -v '^$' || true)"
+  if [ -z "$extra" ]; then
+    return 0
+  fi
+  if [ "$FORCE" -eq 0 ]; then
+    die_fix "s3://$STATE_BUCKET already holds other state for this service: $(printf '%s' "$extra" | tr '\n' ' ')" \
+            "this deployment owns exactly one state key ($STATE_KEY) under the $SERVICE_SLUG/ prefix; use the project that owns that state, or delete it deliberately and re-run with --force"
+  fi
+  warn "s3://$STATE_BUCKET holds other state keys for this service ($(printf '%s' "$extra" | tr '\n' ' ')) — continuing because of --force"
+}
+
+# The state key moved under the service prefix when the deploy buckets started
+# hosting more than one service. Without this check an older deployment would
+# look empty here and be created a second time.
+check_legacy_state_key() {
+  [ "$LEGACY_STATE_KEY" = "$STATE_KEY" ] && return 0
+  s3_object_exists "$STATE_BUCKET" "$LEGACY_STATE_KEY" || return 0
+  if s3_object_exists "$STATE_BUCKET" "$STATE_KEY"; then
+    warn "s3://$STATE_BUCKET holds state at both $LEGACY_STATE_KEY and $STATE_KEY — using $STATE_KEY"
+    return 0
+  fi
+  die_fix "s3://$STATE_BUCKET/$LEGACY_STATE_KEY holds this service's state from before the service prefix" \
+          "move it under the prefix and re-run: aws s3 mv s3://$STATE_BUCKET/$LEGACY_STATE_KEY s3://$STATE_BUCKET/$STATE_KEY --region $AWS_REGION"
+}
+
+# The backend config decides where OpenTofu reads and writes state; the scripts
+# decide where the ownership marker and the guards look. If they disagree, the
+# deployment would plan against an empty state.
+check_backend_key() {
+  local declared
+  declared="$(backend_hcl_key "$BACKEND_HCL")"
+  if [ -z "$declared" ]; then
+    die_fix "could not read the state key from $BACKEND_HCL" "it must contain: key = \"$STATE_KEY\""
+  fi
+  if [ "$declared" != "$STATE_KEY" ]; then
+    die_fix "$BACKEND_HCL declares the state key \"$declared\" but the scripts use \"$STATE_KEY\"" \
+            "point both at the same key (this service's prefix in the deploy bucket is $SERVICE_SLUG/)"
+  fi
+  info "state key: s3://$STATE_BUCKET/$STATE_KEY"
+}
+
+write_deployment_marker() {
+  local file rc
+  file="$(mktemp "${TMPDIR:-/tmp}/unassign-marker.XXXXXX")"
+  deployment_marker_json "$DEPLOYMENT_NAME" "$AWS_REGION" "$AWS_ACCOUNT_ID" \
+                         "$(now_iso8601)" "$AWS_CALLER_ARN" "$DEPLOYMENT_ID" > "$file"
+  rc=0
+  aws_try s3api put-object --bucket "$STATE_BUCKET" --key "$DEPLOYMENT_MARKER_KEY" \
+          --body "$file" --content-type application/json >/dev/null || rc=$?
+  rm -f "$file"
+  if [ "$rc" -ne 0 ]; then
+    die_fix "$(aws_error_reason "$(aws_last_err)") while writing s3://$STATE_BUCKET/$DEPLOYMENT_MARKER_KEY" \
+            "grant s3:PutObject on arn:aws:s3:::$STATE_BUCKET/* to $AWS_CALLER_ARN"
+  fi
+  info "wrote s3://$STATE_BUCKET/$DEPLOYMENT_MARKER_KEY"
+}
+
+bootstrap_state_bucket() {
+  local marker rc m_account m_region m_name m_id
+  if state_bucket_exists; then
+    info "state bucket s3://$STATE_BUCKET exists"
+  else
+    create_state_bucket
+  fi
+  configure_state_bucket
+  check_legacy_state_key
+
+  marker="$(mktemp "${TMPDIR:-/tmp}/unassign-marker.XXXXXX")"
+  rc=0
+  read_deploy_marker "$STATE_BUCKET" "$marker" || rc=$?
+
+  case "$rc" in
+    0)
+      m_account="$(jq -r '.accountId // empty' "$marker")"
+      m_region="$(jq -r '.region // empty' "$marker")"
+      m_name="$(jq -r '.deploymentName // empty' "$marker")"
+      m_id="$(jq -r '.deploymentId // empty' "$marker")"
+      rm -f "$marker"
+      if [ "$m_account" != "$AWS_ACCOUNT_ID" ] || [ "$m_region" != "$AWS_REGION" ] || [ "$m_name" != "$DEPLOYMENT_NAME" ]; then
+        if [ "$FORCE" -eq 0 ]; then
+          die_fix "s3://$STATE_BUCKET belongs to $m_name ($m_region, account $m_account), but you are deploying $DEPLOYMENT_NAME ($AWS_REGION, account $AWS_ACCOUNT_ID)" \
+                  "deploy with the account/region that owns it, or re-run with --force to adopt the bucket"
+        fi
+        warn "adopting s3://$STATE_BUCKET from $m_name ($m_region, account $m_account) because of --force"
+        DEPLOYMENT_ID="$m_id"
+        write_deployment_marker
+      else
+        DEPLOYMENT_ID="$m_id"
+        info "deployment marker verified ($DEPLOYMENT_NAME, $AWS_REGION, account $AWS_ACCOUNT_ID)"
+      fi
+      ;;
+    1)
+      rm -f "$marker"
+      if [ -n "$(state_keys)" ] && [ "$FORCE" -eq 0 ]; then
+        die_fix "s3://$STATE_BUCKET already holds OpenTofu state for this service but no $DEPLOYMENT_MARKER_KEY ownership marker" \
+                "inspect it with: aws s3 ls s3://$STATE_BUCKET/$SERVICE_SLUG/ --recursive — then re-run with --force if it really is this deployment's state"
+      fi
+      DEPLOYMENT_ID="$(random_uuid)" || die_fix "could not generate a deploymentId" "install uuidgen (macOS) or openssl, then re-run"
+      write_deployment_marker
+      ;;
+    *)
+      rm -f "$marker"
+      die_fix "$(aws_error_reason "$MARKER_ERR") while reading s3://$STATE_BUCKET/$DEPLOYMENT_MARKER_KEY" \
+              "grant s3:GetObject on arn:aws:s3:::$STATE_BUCKET/* to $AWS_CALLER_ARN"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Lambda artifact (zero runtime dependencies: the runtime provides SDK v3)
+# ---------------------------------------------------------------------------
+
+# The function is deployed from S3, under a key that names the artifact's
+# content: the same code always maps to the same key, and a changed artifact
+# always maps to a new one, so a stale object can never be deployed.
+artifact_key() { # <sha256>
+  printf 'artifacts/lambda-%s.zip\n' "${1:-}"
+}
+
+file_sha256() { # <file> -> hex digest on stdout
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+  else
+    return 1
+  fi
+}
+
+upload_lambda_artifact() { # <bucket> <key>
+  local bucket="$1" key="$2" bytes
+  bytes="$(wc -c < "$REPO_ROOT/dist/lambda.zip" | tr -d ' ')"
+  info "uploading the artifact to s3://$bucket/$key"
+  must_aws "upload the Lambda artifact" \
+           "grant s3:PutObject on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3api put-object --bucket "$bucket" --key "$key" --body "$REPO_ROOT/dist/lambda.zip" \
+           --server-side-encryption AES256 --region "$AWS_REGION"
+  ok "artifact: s3://$bucket/$key ($bytes bytes)"
+}
+
+# lambda_zip_has_handler <zip> -> 0 when the archive holds src/lambda/handler.js.
+#
+# The listing is read into a variable rather than piped into `grep -q`: greps
+# that match early exit and close the pipe, unzip then takes SIGPIPE, and under
+# `set -o pipefail` that turns a perfectly good archive into a failed build.
+# Missing unzip is treated as "cannot check" so the guard never blocks a deploy.
+lambda_zip_has_handler() {
+  local listing
+  command -v unzip >/dev/null 2>&1 || return 0
+  [ -f "$1" ] || return 1
+  listing="$(unzip -Z1 "$1" 2>/dev/null)" || return 1
+  case "$listing" in
+    *src/lambda/handler.js*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# build_lambda_zip <strict|allow-missing>
+#   strict: this run applies code, so src/ must be present and the archive must
+#           keep the src/ prefix (the handler is src/lambda/handler.handler).
+#   allow-missing: a destroy plan only hashes the archive, so an absent checkout
+#           (or a missing src/) is tolerated — reuse an existing archive or write
+#           a throwaway one rather than blocking the destroy.
+build_lambda_zip() {
+  local mode="$1" tmp
+  local zip="$REPO_ROOT/dist/lambda.zip"
+  mkdir -p "$REPO_ROOT/dist"
+
+  if [ ! -f "$REPO_ROOT/src/lambda/handler.js" ]; then
+    if [ "$mode" = "strict" ]; then
+      die_fix "the Lambda source src/lambda/handler.js is missing from this checkout" \
+              "check out the full branch ($SCRIPT_NAME needs src/ to build dist/lambda.zip): git status"
+    fi
+    if [ -s "$zip" ]; then
+      warn "src/ is missing; reusing the existing dist/lambda.zip for this destroy plan"
+      info "artifact dist/lambda.zip: $(wc -c < "$zip" | tr -d ' ') bytes"
+      return 0
+    fi
+    warn "src/ and dist/lambda.zip are both missing; writing a throwaway archive so the destroy plan can hash one"
+    tmp="$(mktemp -d)"
+    printf '%s\n' "placeholder artifact so the destroy plan can hash dist/lambda.zip" > "$tmp/placeholder.txt"
+    rm -f "$zip"
+    ( cd "$tmp" && zip -qr "$zip" placeholder.txt )
+    rm -rf "$tmp"
+  else
+    info "building dist/lambda.zip from src/"
+    rm -f "$zip"
+    ( cd "$REPO_ROOT" && zip -qr dist/lambda.zip src -x '*.DS_Store' -x '*node_modules*' -x 'test/*' )
+  fi
+
+  if [ ! -s "$zip" ]; then
+    die_fix "dist/lambda.zip was not produced" "run the build by hand to see why: (cd $REPO_ROOT && zip -qr dist/lambda.zip src)"
+  fi
+  if [ "$mode" = "strict" ] && ! lambda_zip_has_handler "$zip"; then
+    die_fix "dist/lambda.zip does not contain src/lambda/handler.js (Terraform expects handler src/lambda/handler.handler)" \
+            "build it from the repo root so the src/ prefix is kept: (cd $REPO_ROOT && zip -qr dist/lambda.zip src)"
+  fi
+  info "artifact dist/lambda.zip: $(wc -c < "$zip" | tr -d ' ') bytes"
+}
+
+# ---------------------------------------------------------------------------
+# OpenTofu
+# ---------------------------------------------------------------------------
+tofu_init() {
+  if [ ! -d "$TF_DIR" ]; then
+    die_fix "the OpenTofu root $TF_DIR does not exist" "restore infra/live/$REGION_CODE (brief §7 Step 8) before deploying"
+  fi
+  if [ ! -f "$BACKEND_HCL" ]; then
+    die_fix "the backend config $BACKEND_HCL does not exist" "restore infra/backend/$REGION_CODE.hcl (state bucket $STATE_BUCKET, key $STATE_KEY, use_lockfile = true)"
+  fi
+  check_backend_key
+  info "tofu init -reconfigure ($BACKEND_HCL)"
+  local rc=0
+  tofu -chdir="$TF_DIR" init -reconfigure -backend-config="$BACKEND_HCL" -input=false || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    die_fix "tofu init failed in $TF_DIR" "fix what the output above reports (credentials for s3://$STATE_BUCKET, provider download, or $BACKEND_HCL), then re-run $SCRIPT_NAME --region $REGION_CODE"
+  fi
+}
+
+run_plan() {
+  PLAN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unassign-plan.XXXXXX")"
+  if [ "$DESTROY" -eq 1 ]; then
+    PLAN_NAME="destroy.tfplan"
+  else
+    PLAN_NAME="deploy.tfplan"
+  fi
+  PLAN_PATH="$PLAN_DIR/$PLAN_NAME"
+  PLAN_JSON_PATH="$PLAN_DIR/plan.json"
+  local rc
+  if [ "$DESTROY" -eq 1 ]; then
+    info "tofu plan -destroy"
+  else
+    info "tofu plan"
+  fi
+  rc=0
+  if [ "$DESTROY" -eq 1 ]; then
+    tofu -chdir="$TF_DIR" plan -destroy -input=false -out="$PLAN_PATH" \
+         -var "lambda_s3_key=$ARTIFACT_KEY" || rc=$?
+  else
+    tofu -chdir="$TF_DIR" plan -input=false -out="$PLAN_PATH" \
+         -var "lambda_s3_key=$ARTIFACT_KEY" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ] || [ ! -s "$PLAN_PATH" ]; then
+    die_fix "tofu plan failed in $TF_DIR" "fix the error reported above, then re-run $SCRIPT_NAME --region $REGION_CODE"
+  fi
+}
+
+print_plan_summary() {
+  local rows adds changes destroys replaces
+  read_plan_json "$PLAN_PATH" "$PLAN_JSON_PATH"
+  rows="$(plan_rows < "$PLAN_JSON_PATH")"
+  adds="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="create"{n++} END{print n+0}')"
+  changes="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="update"{n++} END{print n+0}')"
+  destroys="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="destroy"{n++} END{print n+0}')"
+  replaces="$(printf '%s\n' "$rows" | awk -F'\t' '$1=="replace"{n++} END{print n+0}')"
+  PLAN_ADDS="$adds"; PLAN_CHANGES="$changes"; PLAN_DESTROYS="$destroys"; PLAN_REPLACES="$replaces"
+
+  step "Plan for $DEPLOYMENT_NAME ($AWS_REGION)"
+  if [ "$((adds + changes + destroys + replaces))" -eq 0 ]; then
+    printf '%s\n' "  no resource changes"
+  else
+    render_plan_rows "$rows"
+  fi
+  step "Summary"
+  if [ "$destroys" -gt 0 ] || [ "$replaces" -gt 0 ]; then
+    printf '%s\n' "  ${C_RED}$adds to add, $changes to change, $destroys to destroy, $replaces to replace${C_RESET}"
+  else
+    printf '%s\n' "  $adds to add, $changes to change, 0 to destroy"
+  fi
+}
+
+print_outputs() {
+  local outs
+  outs="$(tofu -chdir="$TF_DIR" output -json 2>/dev/null || printf '{}')"
+  {
+    step "Outputs"
+    printf '%s' "$outs" | jq -r '
+      to_entries[]
+      | select(.value.value != null and .value.value != "")
+      | "  \(.key) = \(.value.value | if type == "string" then . else tojson end)"
+    ' || true
+  } >&2
+  printf '%s' "$outs"
+}
+
+output_value() { # <json output doc> <name>
+  printf '%s' "$2" | jq -r --arg n "$1" '.[$n].value // empty' 2>/dev/null || true
+}
+
+# header_value <headers-file> <header-name> -> the header's value, CR stripped, or "".
+# Always succeeds: under `set -o pipefail` a missing header would otherwise make
+# `x="$(header_value …)"` abort the script — the refused-preflight case, which is
+# precisely the one worth reporting. -m1 rather than `| head -1` for the same
+# reasons (no SIGPIPE into a closed pipe).
+header_value() {
+  if [ "$2" = "HTTP" ]; then # the status line carries no colon
+    grep -m1 -E '^HTTP/' "$1" 2>/dev/null | tr -d '\r' || true
+    return 0
+  fi
+  grep -m1 -i "^$2:" "$1" 2>/dev/null | tr -d '\r' | sed 's/^[^:]*:[[:space:]]*//' || true
+  return 0
+}
+
+# The browser's path is a CORS preflight followed by the POST, and a function
+# URL's CORS block is easy to get subtly wrong — a missing origin, or a method the
+# Lambda API rejects outright. A direct invoke cannot see any of that.
+smoke_test_cors() { # <function-name> <function-url>
+  local fn="$1" url="$2" allowed origin headers rc allow_origin allow_methods status
+  [ -n "$url" ] || return 0
+  if ! command -v curl >/dev/null 2>&1; then
+    info "smoke test: skipping the CORS preflight check (curl is not installed)"
+    return 0
+  fi
+  allowed="$(aws_try lambda get-function-configuration --function-name "$fn" \
+             --query 'Environment.Variables.ALLOWED_ORIGINS' --output text 2>/dev/null || true)"
+  if [ -z "$allowed" ] || [ "$allowed" = "None" ]; then
+    warn "the function has no ALLOWED_ORIGINS, so the browser cannot call this deployment"
+    hint "set allowed_origins in infra/live/$REGION_CODE and re-run $SCRIPT_NAME --region $REGION_CODE"
+    return 0
+  fi
+  # The first configured origin, turned into a real value: a pattern like
+  # https://*.geotab.com cannot be sent as an Origin header.
+  origin="$(probe_origin_from_pattern "${allowed%%,*}")"
+  headers="$(mktemp "${TMPDIR:-/tmp}/unassign-cors.XXXXXX")"
+  rc=0
+  curl -sS -o /dev/null -D "$headers" -X OPTIONS "$url" \
+       -H "Origin: $origin" -H "Access-Control-Request-Method: POST" \
+       -H "Access-Control-Request-Headers: content-type" -m 10 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$headers"
+    warn "smoke test: the CORS preflight to $url could not be sent (curl exit $rc)"
+    return 0
+  fi
+  allow_origin="$(header_value "$headers" 'access-control-allow-origin')"
+  allow_methods="$(header_value "$headers" 'access-control-allow-methods')"
+  status="$(header_value "$headers" 'HTTP')"
+  rm -f "$headers"
+
+  info "smoke test: CORS preflight for $origin ($status)"
+  if [ -n "$allow_origin" ]; then
+    ok "the function URL answers the preflight (allow-origin: $allow_origin${allow_methods:+, allow-methods: $allow_methods})"
+  else
+    warn "the function URL did not allow $origin, so the add-in cannot call it"
+    hint "add the add-in's frame origin to allowed_origins in infra/live/$REGION_CODE, then re-run $SCRIPT_NAME --region $REGION_CODE"
+  fi
+}
+
+# health_result <response json> -> "ok: <status> <deployment>" or "bad: <code> <message>".
+#
+# A direct invoke returns whatever the handler returned, which for the request
+# path is the HTTP envelope ({statusCode, headers, body}) and for a bare result
+# is the result itself. Both shapes are accepted.
+health_result() {
+  local response="${1:-}"
+  # jq treats empty input as an empty stream and exits 0, so guard it here.
+  if [ -z "$response" ]; then
+    printf 'bad: unreadable response'
+    return 0
+  fi
+  printf '%s' "$response" | jq -r '
+    (if (.body | type) == "string" then (.body | fromjson) else . end) as $inner
+    | if $inner.ok == true then "ok: " + ($inner.data.status // "?") + " " + ($inner.data.deployment // "")
+      else "bad: " + ($inner.error.code // "unknown") + " " + ($inner.error.message // "") end
+  ' 2>/dev/null || printf 'bad: unreadable response'
+}
+
+smoke_test() { # <function-name>
+  local fn="$1" out rc body result
+  out="$(mktemp "${TMPDIR:-/tmp}/unassign-health.XXXXXX")"
+  info "smoke test: invoking $fn with {\"action\":\"health\"}"
+  rc=0
+  aws_try lambda invoke --function-name "$fn" --cli-binary-format raw-in-base64-out \
+          --payload '{"action":"health"}' "$out" >/dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$out"
+    warn "health invoke failed: $(aws_error_reason "$(aws_last_err)")"
+    hint "check the function name and logs: aws logs tail /aws/lambda/$fn --region $AWS_REGION --since 10m"
+    return 0
+  fi
+  body="$(head -c 4000 "$out" 2>/dev/null || true)"
+  rm -f "$out"
+  result="$(health_result "$body")"
+  case "$result" in
+    ok:*)
+      ok "health: $result"
+      ;;
+    *)
+      warn "the health action answered: $result"
+      warn "raw: $(printf '%s' "$body" | head -c 400)"
+      hint "see the logs: aws logs tail /aws/lambda/$fn --region $AWS_REGION --since 10m"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Add-in hosting
+# ---------------------------------------------------------------------------
+# The page customers' MyGeotab loads lives in a bucket of its own, outside the
+# Terraform state (it is a delivery detail of this repo, not an AWS resource the
+# deployment owns — the buckets were made by hand and are shared per region).
+# Terraform knows nothing about it, so this step owns it: create when missing,
+# make it readable, then upload the page with this region's endpoint stamped in.
+addin_bucket_for() { region_field "$REGION_CODE" addin; }
+
+addin_bucket_exists() { # <bucket>: 0 exists, 1 missing, dies on anything else
+  if aws_try s3api head-bucket --bucket "$1" >/dev/null; then
+    return 0
+  fi
+  case "$(aws_last_err)" in
+    *404*|*NoSuchBucket*|*"Not Found"*) return 1 ;;
+    *)
+      die_fix "$(aws_error_reason "$(aws_last_err)") while checking the add-in hosting bucket $1" \
+              "verify with: aws s3api head-bucket --bucket $1 --region $AWS_REGION"
+      ;;
+  esac
+}
+
+create_addin_bucket() { # <bucket>
+  info "creating add-in hosting bucket s3://$1 in $AWS_REGION"
+  must_aws "create s3://$1" \
+           "grant s3:CreateBucket in $AWS_REGION (and check the bucket name is free), then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3api create-bucket --bucket "$1" \
+           --create-bucket-configuration "LocationConstraint=$AWS_REGION"
+}
+
+# Public read of this service's own prefix, granted by policy — ACLs stay
+# blocked. The page is fetched by MyGeotab, so it cannot require credentials.
+# The CORS rule matters just as much: the page and its translations are fetched
+# from a my.geotab.com frame, and without it the browser blocks them ("No
+# 'Access-Control-Allow-Origin' header is present on the requested resource").
+configure_addin_bucket() { # <bucket> <comma-separated origins, from the function>
+  local bucket="$1" allowed="${2:-}" policy cors rc=0
+  policy="$(jq -n --arg bucket "$bucket" '{Version:"2012-10-17", Statement:[{
+    Sid: "ReadTheAddinPage",
+    Effect: "Allow",
+    Principal: "*",
+    Action: "s3:GetObject",
+    Resource: ("arn:aws:s3:::" + $bucket + "/unassign/*")
+  }]}')" || die_fix "could not build the add-in bucket policy" "is jq installed?"
+  must_aws "allow the add-in page to be read" \
+           "grant s3:PutBucketPolicy on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3api put-public-access-block --bucket "$bucket" \
+           --public-access-block-configuration \
+           'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=false,RestrictPublicBuckets=false'
+  must_aws "attach the read policy to s3://$bucket" \
+           "grant s3:PutBucketPolicy on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3api put-bucket-policy --bucket "$bucket" --policy "$policy"
+
+  if [ -z "$allowed" ]; then
+    warn "the deployment has no ALLOWED_ORIGINS, so the bucket got no CORS rule and a browser will block the add-in's own fetches"
+    hint "set allowed_origins in infra/live/$REGION_CODE and re-run $SCRIPT_NAME --region $REGION_CODE"
+  else
+    cors="$(addin_cors_rule_json "$allowed")" || rc=$?
+    case "${rc:-0}" in
+      0) : ;;
+      2) cors="" ; warn "ALLOWED_ORIGINS is empty, so the bucket got no CORS rule" ;;
+      *) die_fix "ALLOWED_ORIGINS ('$allowed') contains an origin S3 cannot express (at most one '*' per entry)" \
+                 "fix allowed_origins in infra/live/$REGION_CODE (for example https://*.geotab.com), then re-run $SCRIPT_NAME --region $REGION_CODE" ;;
+    esac
+    if [ -n "$cors" ]; then
+      must_aws "allow the add-in's origins to read s3://$bucket from a browser" \
+               "grant s3:PutBucketCORS on $bucket, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+               s3api put-bucket-cors --bucket "$bucket" --cors-configuration "$cors"
+      ok "bucket CORS: $(printf '%s' "$allowed" | tr ',' ' ')"
+    fi
+  fi
+
+  # Versions let a bad page be rolled back without a redeploy.
+  if ! aws_try s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled >/dev/null; then
+    warn "could not enable versioning on s3://$bucket: $(aws_error_reason "$(aws_last_err)")"
+  fi
+}
+
+# publish_addin <bucket> <function-url>: uploads the page and proves it is
+# readable from where MyGeotab reads it.
+publish_addin() {
+  local bucket="$1" key page public rc=0 url before before_display landed landed_size landed_etag landed_version
+  local allowed_origins probe_origin lang file translation_key
+  url="$(strip_trailing_slashes "${2:-}")"
+  key="$(addin_object_key)"
+  public="$(addin_object_url "$bucket" "$AWS_REGION" "$key")"
+  if [ -z "$url" ]; then
+    warn "the deployment has no function URL, so the add-in page was not published"
+    hint "the outputs above should carry function_url — check the Lambda resource, then re-run $SCRIPT_NAME --region $REGION_CODE"
+    return 0
+  fi
+
+  # The origins the deployment already accepts are the authority for the bucket's
+  # CORS rule — reading them keeps the two from drifting.
+  allowed_origins="$(aws_try lambda get-function-configuration --function-name "$FN_NAME" \
+                     --query 'Environment.Variables.ALLOWED_ORIGINS' --output text \
+                     --region "$AWS_REGION" 2>/dev/null || true)"
+  case "$allowed_origins" in None) allowed_origins="" ;; esac
+
+  addin_bucket_exists "$bucket" || create_addin_bucket "$bucket"
+  configure_addin_bucket "$bucket" "$allowed_origins"
+
+  page="$(mktemp "${TMPDIR:-/tmp}/unassign-addin.XXXXXX")" || die_fix "could not create a temp file" "is TMPDIR writable?"
+  render_addin_html "$REPO_ROOT/unassignDrivers.html" "$url" > "$page" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$page"
+    case "$rc" in
+      2) die_fix "could not read $REPO_ROOT/unassignDrivers.html (or the endpoint was empty)" "is the working tree complete?" ;;
+      *) die_fix "unassignDrivers.html has no 'var SERVER_API_BASE = \"…\";' line to stamp with $url" \
+                 "restore that line in the add-in (it is how the page finds its deployment) and re-run $SCRIPT_NAME --region $REGION_CODE" ;;
+    esac
+  fi
+
+  # What is already published, so the run can say whether this upload changed it
+  # (a no-change deploy still uploads — that is how a page-only fix ships).
+  before="$(aws_try s3api head-object --bucket "$bucket" --key "$key" --query 'ETag' \
+            --output text --region "$AWS_REGION" 2>/dev/null || true)"
+
+  info "uploading $REPO_ROOT/unassignDrivers.html to s3://$bucket/$key"
+  info "  with SERVER_API_BASE = $url"
+  must_aws "upload the add-in page to s3://$bucket/$key" \
+           "grant s3:PutObject on $bucket/unassign/*, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+           s3 cp "$page" "s3://$bucket/$key" \
+           --content-type 'text/html; charset=utf-8' \
+           --cache-control 'public, max-age=60, must-revalidate' \
+           --metadata "deployment=$DEPLOYMENT_NAME" \
+           --region "$AWS_REGION" --only-show-errors
+  rm -f "$page"
+
+  # Read the object back, so the run states what was stored rather than that the
+  # command was issued.
+  landed="$(aws_try s3api head-object --bucket "$bucket" --key "$key" \
+            --query '[ContentLength, ETag, VersionId]' --output json --region "$AWS_REGION" 2>/dev/null || true)"
+  landed_size="$(printf '%s' "$landed" | jq -r '.[0] // empty' 2>/dev/null || true)"
+  landed_etag="$(printf '%s' "$landed" | jq -r '.[1] // empty' 2>/dev/null || true)"
+  landed_version="$(printf '%s' "$landed" | jq -r '.[2] // empty' 2>/dev/null || true)"
+  if [ -z "$landed_size" ]; then
+    warn "the upload reported success, but s3://$bucket/$key cannot be read back"
+    hint "check by hand: aws s3api head-object --bucket $bucket --key $key --region $AWS_REGION"
+  else
+    ok "uploaded the $REGION_CODE add-in page: s3://$bucket/$key ($landed_size bytes${landed_version:+, version $landed_version})"
+    before_display="${before//\"/}"
+    case "$(addin_upload_note "$before" "$landed_etag")" in
+      identical) info "the page is identical to the copy the bucket already had" ;;
+      changed)   ok "the page changed: it replaces the copy with ETag $before_display" ;;
+      *)         ok "this is the first add-in page in s3://$bucket" ;;
+    esac
+  fi
+
+  # MyGeotab fetches translations from a folder beside the page, so they ship
+  # with it: without them the add-in's own fetch fails (and without CORS on the
+  # bucket, the browser refuses the response before the status even matters).
+  local translation_url
+  for lang in $(addin_translation_langs); do
+    file="$REPO_ROOT/translations/$lang.json"
+    translation_key="$(addin_translation_key "$lang")"
+    if [ ! -f "$file" ]; then
+      warn "no $file, so s3://$bucket/$translation_key will not exist and MyGeotab's $lang fetch will fail"
+      continue
+    fi
+    if ! jq -e . "$file" >/dev/null 2>&1; then
+      die_fix "$file is not valid JSON" \
+              "fix it (Geotab's own add-ins ship a {\"source string\": \"translation\"} map) and re-run $SCRIPT_NAME --region $REGION_CODE"
+    fi
+    must_aws "upload the $lang translations to s3://$bucket/$translation_key" \
+             "grant s3:PutObject on $bucket/unassign/*, then re-run $SCRIPT_NAME --region $REGION_CODE" \
+             s3 cp "$file" "s3://$bucket/$translation_key" \
+             --content-type 'application/json; charset=utf-8' \
+             --cache-control 'public, max-age=60, must-revalidate' \
+             --metadata "deployment=$DEPLOYMENT_NAME" \
+             --region "$AWS_REGION" --only-show-errors
+    ok "uploaded the $lang translations: s3://$bucket/$translation_key"
+  done
+
+  if ! command -v curl >/dev/null 2>&1; then
+    info "smoke test: skipping the add-in fetches (curl is not installed)"
+    info "the page's public URL: $public"
+    return 0
+  fi
+
+  # Fetched the way a browser fetches it: with an Origin header, expecting the
+  # bucket's CORS rule to answer. This is the check that would have caught the
+  # add-in's translations request being blocked.
+  probe_origin="$(probe_origin_from_pattern "${allowed_origins%%,*}")"
+  # Warnings, not failures: the uploads above are what must not fail.
+  verify_addin_object "$public" "$probe_origin" "the add-in page" "$url" || true
+  for lang in $(addin_translation_langs); do
+    [ -f "$REPO_ROOT/translations/$lang.json" ] || continue
+    translation_url="$(addin_object_url "$bucket" "$AWS_REGION" "$(addin_translation_key "$lang")")"
+    verify_addin_object "$translation_url" "$probe_origin" "the $lang translations" "" || true
+  done
+}
+
+# verify_addin_object <url> <origin> <what> [<text the body must contain>]
+# Fetches with an Origin header and checks what the browser needs: a status, the
+# CORS header for that origin, and (for the page) the endpoint it names.
+verify_addin_object() {
+  local url="$1" origin="$2" what="$3" must="${4:-}" rc=0 headers body status ctype allow
+  headers="$(mktemp "${TMPDIR:-/tmp}/unassign-headers.XXXXXX")"
+  body="$(mktemp "${TMPDIR:-/tmp}/unassign-body.XXXXXX")"
+  curl -sS -m 15 -D "$headers" -o "$body" -H "Origin: $origin" "$url" >/dev/null 2>&1 || rc=$?
+  # The status line is either "HTTP/2 200" or "HTTP/1.1 200 OK": take the code.
+  status="$(header_value "$headers" 'HTTP' | awk '{print $2}')"
+  ctype="$(header_value "$headers" 'content-type')"
+  allow="$(header_value "$headers" 'access-control-allow-origin')"
+
+  if [ "$rc" -ne 0 ] || [ -z "$status" ]; then
+    rm -f "$headers" "$body"
+    warn "could not fetch $what at $url (curl exit $rc)"
+    return 1
+  fi
+  if [ -z "$allow" ]; then
+    rm -f "$headers" "$body"
+    warn "$what does not allow the origin $origin, so the browser blocks it (HTTP $status)"
+    hint "the bucket's CORS rule comes from the Lambda's ALLOWED_ORIGINS — check: aws s3api get-bucket-cors --bucket <bucket> --region $AWS_REGION"
+    return 1
+  fi
+  if [ -n "$must" ] && ! grep -qF "$must" "$body"; then
+    rm -f "$headers" "$body"
+    warn "$what is served but does not name $must"
+    hint "it may be a cached copy: re-run $SCRIPT_NAME --region $REGION_CODE, then check with curl -s $url | grep SERVER_API_BASE"
+    return 1
+  fi
+  rm -f "$headers" "$body"
+  ok "$what: $url (HTTP $status, $ctype, ${must:+names $must, }allows $origin)"
+  return 0
+}
+
+# print_addin_config <public url>: the region's committed configuration, checked
+# against what this run published. Printing the file rather than rewriting a URL
+# into a shared one means the config an operator pastes is reviewable in git.
+print_addin_config() {
+  local public="$1" file configured
+  file="$(addin_config_path "$REPO_ROOT" "$REGION_CODE")"
+  if [ ! -f "$file" ]; then
+    warn "there is no $file in this working tree, so there is no configuration to paste"
+    hint "add it, naming $public, then re-run $SCRIPT_NAME --region $REGION_CODE"
+    return 0
+  fi
+  configured="$(addin_config_url "$file" || true)"
+  if [ "$configured" != "$public" ]; then
+    warn "$file points at $configured, but this deployment publishes to $public"
+    hint "fix the url in $file (bucket and key come from scripts/lib/common.sh), then re-run $SCRIPT_NAME --region $REGION_CODE"
+    return 0
+  fi
+  jq . "$file" || warn "could not read $file"
+}
+
+cleanup() {
+  aws_err_cleanup
+  if [ -n "$PLAN_DIR" ] && [ -d "$PLAN_DIR" ]; then
+    rm -rf "$PLAN_DIR"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+PLAN_ADDS=0; PLAN_CHANGES=0; PLAN_DESTROYS=0; PLAN_REPLACES=0
+trap cleanup EXIT
+
+if [ "$SELFTEST" -eq 1 ]; then
+  PLAN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unassign-plan.XXXXXX")"
+  run_selftest
+fi
+
+select_region "$REGION_RAW"
+
+if [ "$ASSUME_YES" -eq 1 ] && [ "$DESTROY" -eq 1 ]; then
+  warn "--yes does not skip the destroy confirmation; you will still type the deployment name"
+fi
+
+step "Preflight ($DEPLOYMENT_NAME, $AWS_REGION)"
+preflight_commands
+caller_identity
+check_environment_region
+check_scheduler_access
+
+step "State bucket s3://$STATE_BUCKET"
+bootstrap_state_bucket
+
+step "Lambda artifact"
+if [ "$DESTROY" -eq 1 ]; then
+  build_lambda_zip allow-missing
+else
+  build_lambda_zip strict
+fi
+
+# The function deploys from S3, not from a local archive: the provider would
+# inline the archive as base64 in the request, and the SDK rejects a request
+# whose single line passes 64 KiB — a 48 KiB archive (issue: "decomposing
+# request: bufio.Scanner: token too long"). Uploading first has no such ceiling.
+ARTIFACT_BUCKET="$(region_field "$REGION_CODE" config)"
+if [ -s "$REPO_ROOT/dist/lambda.zip" ]; then
+  ARTIFACT_SHA="$(file_sha256 "$REPO_ROOT/dist/lambda.zip")" \
+    || die_fix "could not hash $REPO_ROOT/dist/lambda.zip" "install sha256sum or shasum, then re-run $SCRIPT_NAME --region $REGION_CODE"
+  ARTIFACT_KEY="$(artifact_key "$ARTIFACT_SHA")"
+  if [ "$DESTROY" -eq 0 ]; then
+    upload_lambda_artifact "$ARTIFACT_BUCKET" "$ARTIFACT_KEY"
+  else
+    info "destroy plan: not uploading the artifact (nothing will run it)"
+  fi
+fi
+
+check_state_keys
+
+step "OpenTofu"
+tofu_init
+run_plan
+print_plan_summary
+
+PLAN_EMPTY=0
+if [ "$((PLAN_ADDS + PLAN_CHANGES + PLAN_DESTROYS + PLAN_REPLACES))" -eq 0 ]; then
+  if [ "$DESTROY" -eq 1 ]; then
+    ok "Nothing to destroy: $DEPLOYMENT_NAME has no managed resources left."
+    exit 0
+  fi
+  ok "No changes: $DEPLOYMENT_NAME in $AWS_REGION is already up to date (state and config in s3://$STATE_BUCKET)."
+  # The add-in page lives outside Terraform and is published on every run, so a
+  # no-change deploy still refreshes it: that is how a page-only fix ships.
+  PLAN_EMPTY=1
+fi
+
+if [ "$PLAN_ONLY" -eq 1 ]; then
+  info "--plan-only: stopping after the plan. Apply it with: $SCRIPT_NAME --region $REGION_CODE${DESTROY:+ --destroy}"
+  exit 0
+fi
+
+if [ "$DESTROY" -eq 1 ]; then
+  if ! is_stdin_tty; then
+    die_fix "destroy requires an interactive terminal (the deployment name must be typed)" \
+            "run $SCRIPT_NAME --region $REGION_CODE --destroy from a terminal"
+  fi
+  warn "a destroy removes only what Terraform manages. Tenant secrets and tenant schedule groups created at runtime survive it — offboard the tenants first if you want them gone: scripts/offboard-customer.sh --region $REGION_CODE"
+  if ! prompt_typed "This DESTROYS $PLAN_DESTROYS resource(s) (and replaces $PLAN_REPLACES) of the $DEPLOYMENT_NAME deployment in $AWS_REGION: the config bucket, the Lambda function and its URL, the IAM roles, the DLQ, the log group and the alarms. The state bucket s3://$STATE_BUCKET is kept." "$DEPLOYMENT_NAME"; then
+    die_fix "destroy cancelled: the typed name did not match '$DEPLOYMENT_NAME'" "re-run $SCRIPT_NAME --region $REGION_CODE --destroy and type the deployment name exactly as shown"
+  fi
+elif [ "$PLAN_EMPTY" -eq 1 ]; then
+  info "nothing to apply: the infrastructure already matches the configuration"
+elif [ "$ASSUME_YES" -eq 0 ]; then
+  if ! prompt_yes_no "Apply this plan to $DEPLOYMENT_NAME ($AWS_REGION)?" n; then
+    die_fix "deploy aborted at the confirmation prompt — nothing was applied" "re-run $SCRIPT_NAME --region $REGION_CODE when you are ready, or pass --yes to skip the prompt"
+  fi
+else
+  info "--yes: applying without asking"
+fi
+
+if [ "$PLAN_EMPTY" -eq 0 ]; then
+  step "Apply"
+  rc=0
+  tofu -chdir="$TF_DIR" apply -input=false "$PLAN_PATH" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    die_fix "tofu apply failed in $TF_DIR — the deployment is only partly applied" "read the error above, fix it, then re-run $SCRIPT_NAME --region $REGION_CODE: a re-run plans the remainder and applies nothing twice"
+  fi
+fi
+
+if [ "$DESTROY" -eq 1 ]; then
+  ok "destroyed $DEPLOYMENT_NAME. The state bucket s3://$STATE_BUCKET and its deployment marker were left in place on purpose."
+  info "to remove the state bucket itself (types the bucket name): aws s3 rb s3://$STATE_BUCKET --force --region $AWS_REGION"
+  info "the published add-in page was left in place (it is not a Terraform resource); MyGeotab would call an endpoint that no longer exists. To remove it: aws s3 rm s3://$(addin_bucket_for)/$(addin_object_key) --region $AWS_REGION"
+  exit 0
+fi
+
+OUTS="$(print_outputs)"
+FN_NAME="$(output_value function_name "$OUTS")"
+[ -n "$FN_NAME" ] || FN_NAME="$LAMBDA_FUNCTION_NAME"
+smoke_test "$FN_NAME"
+smoke_test_cors "$FN_NAME" "$(output_value function_url "$OUTS")"
+
+ADDIN_BUCKET="$(addin_bucket_for)"
+ADDIN_URL="$(addin_object_url "$ADDIN_BUCKET" "$AWS_REGION" "$(addin_object_key)")"
+step "Add-in page (s3://$ADDIN_BUCKET/$(addin_object_key))"
+publish_addin "$ADDIN_BUCKET" "$(output_value function_url "$OUTS")"
+
+step "Next steps"
+printf '%s\n' "  endpoint    : $(output_value function_url "$OUTS")"
+printf '%s\n' "  config      : s3://$(output_value config_bucket "$OUTS")/$(output_value config_key "$OUTS")"
+printf '%s\n' "  group prefix: $(output_value schedule_group_prefix "$OUTS")"
+printf '%s\n' "  alarms      : $(output_value alarm_topic_arn "$OUTS")"
+printf '%s\n' "  dlq         : $(output_value dlq_url "$OUTS")"
+printf '%s\n' "  add-in page : $ADDIN_URL"
+printf '\n'
+printf '%s\n' "In MyGeotab: System Settings -> Add-Ins -> Allow unverified Add-Ins, then New Add-In and"
+printf '%s\n' "paste this as the configuration (or replace the existing entry for this add-in):"
+printf '\n'
+print_addin_config "$ADDIN_URL"
+printf '\n'
+printf '%s\n' "Onboard a customer:  scripts/onboard-customer.sh --region $REGION_CODE"
+ok "$DEPLOYMENT_NAME deployed in $AWS_REGION (account $AWS_ACCOUNT_ID)."
